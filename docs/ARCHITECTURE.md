@@ -1,12 +1,9 @@
 <div align="center">
 
-# 🦾 sEMG → Signal Analysis → Drone Simulation
+# sEMG → Signal Analysis → Drone Simulation
 
 **Global architecture & IPC contracts**
 
-![Status](https://img.shields.io/badge/status-design%20agreed-blue)
-![Code](https://img.shields.io/badge/code-not%20written%20yet-lightgrey)
-![Python](https://img.shields.io/badge/python-3.13+-3776AB?logo=python&logoColor=white)
 
 </div>
 
@@ -16,7 +13,7 @@
 
 ---
 
-## 📑 Table of contents
+## Table of contents
 
 - [1. Overview](#1-overview)
 - [2. Process map](#2-process-map)
@@ -39,8 +36,8 @@ topology**:
 
 | Plane | Component | Role |
 |:--|:--|:--|
-| 🧠 **Control** | **P0** — orchestrator + GUI | Process lifecycle, model selection, command routing |
-| 🔄 **Data** | **SHM circular buffer** | Single-producer / multi-consumer ring of raw EMG samples |
+| **Control** | **P0** — orchestrator + GUI | Process lifecycle, model selection, command routing |
+| **Data** | **SHM circular buffer** | Single-producer / multi-consumer ring of raw EMG samples |
 
 Every other process is a **pure producer** or a **pure consumer** of one of those
 two planes. No process talks to another except through **P0** or through the **ring**.
@@ -56,7 +53,7 @@ two planes. No process talks to another except through **P0** or through the **r
 | 5 | **Code and weights are separate artifacts** | Editing `model.py` respawns the process; retraining produces a new `.pkl`. Neither implies the other. |
 | 6 | **Commands expire** | P0 stamps a deadline on every command. No fresh command before the deadline → the simulator falls back to `rest`. |
 
-> 💡 **Principle 6 is the keystone.** It makes model death, model switching, and
+> **Principle 6 is the keystone.** It makes model death, model switching, and
 > low-confidence output all behave correctly **without any special-case code**.
 
 ---
@@ -65,30 +62,30 @@ two planes. No process talks to another except through **P0** or through the **r
 
 ```mermaid
 flowchart TB
-    subgraph P0["🧠 P0 — Orchestrator + GUI (PySide6)"]
+    subgraph P0["P0 — Orchestrator + GUI (PySide6)"]
         direction LR
-        UI["🖥️ GUI<br/>model table · selector<br/>reload · calibrate · train"]
-        CTRL["⚙️ Control loop (QTimer tick)<br/>drain queues · route to Ps<br/>check deadlines · watch files"]
-        RINGOWN["🔒 Owns SHM ring handle<br/>is_creating=True<br/>kept alive for session"]
+        UI["GUI<br/>model table · selector<br/>reload · calibrate · train"]
+        CTRL["Control loop (QTimer tick)<br/>drain queues · route to Ps<br/>check deadlines · watch files"]
+        RINGOWN["Owns SHM ring handle<br/>is_creating=True<br/>kept alive for session"]
         UI <--> CTRL
         CTRL --- RINGOWN
     end
 
-    subgraph DATA["🔄 Data plane — SHM circular buffer"]
+    subgraph DATA["Data plane — SHM circular buffer"]
         RING[("EmgRing<br/>━━━━━━━━━━<br/>timestamp_ns : int64<br/>emg : float32[4]<br/>━━━━━━━━━━<br/>24 bytes / slot")]
     end
 
-    subgraph PROCS["⚙️ Worker processes"]
+    subgraph PROCS["Worker processes"]
         direction LR
-        P1["📡 P1 — Acquisition<br/>Bluetooth sEMG driver"]
-        PC["🎙️ Pc — Calibration<br/>read_fifo → .npz"]
-        PM1["🧮 Pm1 — model A"]
-        PM2["🧮 Pm2 — model B"]
-        PMN["🧮 PmN — model N"]
-        PS["🚁 Ps — Simulator<br/>(Ursina 3D)"]
+        P1["P1 — Acquisition<br/>Bluetooth sEMG driver"]
+        PC["Pc — Calibration<br/>read_fifo → .npz"]
+        PM1["Pm1 — model A"]
+        PM2["Pm2 — model B"]
+        PMN["PmN — model N"]
+        PS["Ps — Simulator<br/>(Ursina 3D)"]
     end
 
-    subgraph DISK["💾 Disk"]
+    subgraph DISK["Disk"]
         direction LR
         CALIB[("data/calib_*.npz")]
         WEIGHTS[("models/*.pkl")]
@@ -139,7 +136,7 @@ flowchart TB
 
 ## 3. Processes
 
-### 🧠 P0 — Orchestrator + GUI
+### P0 — Orchestrator + GUI
 
 | Responsibility | Detail |
 |:--|:--|
@@ -152,17 +149,17 @@ flowchart TB
 | **Train action** | Spawns a short-lived trainer subprocess, waits, then (re)spawns the `Pm_i` |
 | **Calibrate action** | Spawns `Pc`, waits for it to finish, reports success / overflow |
 
-> ⚠️ **Concurrency rule.** The control loop and the GUI must never block each
+> **Concurrency rule.** The control loop and the GUI must never block each
 > other. The loop runs on the Qt timer; the GUI reads a snapshot of state and
 > posts commands back. **No blocking calls inside the tick.**
 
-### 📡 P1 — Acquisition
+### P1 — Acquisition
 
 - Talks to the Bluetooth sEMG sensor.
 - Writes one slot per sample: `write(record)`.
 - Knows nothing about consumers. Runs whether or not anyone reads.
 
-### 🎙️ Pc — Calibration
+### Pc — Calibration
 
 - Spawned on demand by P0, **short-lived**.
 - Reads the ring with `read_next_fifo("calib")`.
@@ -171,7 +168,7 @@ flowchart TB
 - Writes `data/calib_*.npz` (format follows the existing `simu_basic` datasets).
 - Exits when the user stops the recording.
 
-### 🧮 Pm_i — Model process (one per model)
+### Pm_i — Model process (one per model)
 
 Linear lifecycle — **no state machine**:
 
@@ -195,7 +192,7 @@ Two launch modes:
 `read_last_n` returns `(structured_array, overrun)`; `overrun` may be ignored
 (the model only cares about the most recent window).
 
-### 🚁 Ps — Simulator
+### Ps — Simulator
 
 - Ursina 3D app (already prototyped in `simu_basic/main.py`).
 - **Never touches the ring.**
@@ -207,7 +204,7 @@ Two launch modes:
 
 ## 4. IPC contracts
 
-### 4.1 🔄 SHM ring — data plane
+### 4.1 SHM ring — data plane
 
 Reuses the existing `CircularBuffer` from `new_camera/ring/circular_buffer.py`
 **unchanged**. A new `EmgRing` subclass follows the `estimation_ring.py` template.
@@ -229,7 +226,7 @@ emg_slot_dtype = np.dtype([
 | Consumer | Method | Returns | Policy |
 |:--|:--|:--|:--|
 | **P1** | `write(record)` | — | single producer, no lock needed |
-| **Pc** | `read_next_fifo("calib")` | `(record, last_seen, gap)` | 🚨 **abort if `gap > 0`** |
+| **Pc** | `read_next_fifo("calib")` | `(record, last_seen, gap)` | **abort if `gap > 0`** |
 | **Pm_i** | `read_last_n(N)` | `(structured_array, overrun)` | ignore `overrun` |
 | **P0** | `read_latest()` | `(record, write_count)` | debug only |
 
@@ -243,7 +240,7 @@ emg_slot_dtype = np.dtype([
   "same slot, new data" unambiguous.
 - Reads `.copy()` immediately, so a consumer never sees a half-written slot.
 
-### 4.2 🧮 Pm_i → 🧠 P0 — classification
+### 4.2 Pm_i → P0 — classification
 
 One `mp.Queue` per model, created by P0 and passed at spawn.
 
@@ -260,7 +257,7 @@ One `mp.Queue` per model, created by P0 and passed at spawn.
 - `confidence` is optional so threshold-based models can omit it.
 - `seq` lets P0 and the GUI detect a stalled model.
 
-### 4.3 🧠 P0 → 🚁 Ps — command
+### 4.3 P0 → Ps — command
 
 One `mp.Queue`, created by P0.
 
@@ -272,12 +269,12 @@ One `mp.Queue`, created by P0.
 }
 ```
 
-> ⏱️ **Expiry semantics.** Ps holds the last command until `now > deadline`, then
+> **Expiry semantics.** Ps holds the last command until `now > deadline`, then
 > applies `rest`. **P0 stamps the deadline** (it knows the model's expected emit
 > rate); Ps only compares against `now`. This is what makes model death, model
 > switching, and low-confidence output all behave correctly without special cases.
 
-### 4.4 🎙️ Pc → 💾 disk — calibration dataset
+### 4.4 Pc → disk — calibration dataset
 
 `data/calib_<timestamp>.npz`, following the existing `simu_basic` dataset layout
 (produced today by the Shimmer acquisition pipeline).
@@ -304,7 +301,7 @@ def predict(window) -> (label, confidence)     # window: structured array from r
 | `fit` | trainer subprocess | Mode B, or the explicit train action |
 | `load` + `predict` | long-lived `Pm_i` loop | every inference tick |
 
-> 🧼 **The model never touches the ring, the queues, or the filesystem.** P0 and
+> **The model never touches the ring, the queues, or the filesystem.** P0 and
 > the `Pm_i` wrapper handle all I/O.
 
 ---
@@ -323,7 +320,7 @@ def predict(window) -> (label, confidence)     # window: structured array from r
 4. Unchanged models keep running untouched. The ring is untouched (shared memory
    survives process death). The new `Pm_i` reads the ring from "now" onward.
 
-> 🔀 **Code vs. weights.** A `.py` change **respawns only**. Retraining is a
+> **Code vs. weights.** A `.py` change **respawns only**. Retraining is a
 > separate, explicit action — otherwise every typo fix would kick off a training run.
 
 ---
@@ -342,11 +339,11 @@ interface with buttons and windows, not a terminal UI.
 | **Buttons** | Reload · Start/Stop calibration · Train · Start/Stop acquisition |
 | **Status bar** | Ring fill level · P1 sample rate · Ps connection state |
 
-> ⚙️ **Concurrency.** The control loop runs on a `QTimer` tick; the GUI reads a
+> **Concurrency.** The control loop runs on a `QTimer` tick; the GUI reads a
 > snapshot of state and posts commands back. The loop never blocks the UI and the
 > UI never blocks the loop.
 
-> 🪟 **Ps is a separate window** (its own process, its own Ursina window). Keeping
+> **Ps is a separate window** (its own process, its own Ursina window). Keeping
 > it separate avoids coupling the 3D engine to the orchestrator.
 
 ---
@@ -377,12 +374,12 @@ interface with buttons and windows, not a terminal UI.
 
 | Item | Status | Notes |
 |:--|:--|:--|
-| **YAML schema** | ⏸️ deferred | To be defined step by step |
-| **Label vocabulary** | ⏸️ open | Concrete list (e.g. `rest`, `forward`, `back`, `left`, `right`, `up`, `down`) + image paths |
-| **Calibration `.npz` keys** | ⏸️ open | Align with existing `simu_basic` datasets when the recorder is written |
-| **Feature extraction** | ⏸️ open | Shared across models (recommended) vs. per-model |
-| **Model hot-reload trigger** | ⏸️ open | Button only, or also a file watcher? (Same mechanism, different trigger) |
-| **Ps label → motion mapping** | ⏸️ open | Where it lives (YAML vs. Ps code) |
+| **YAML schema** | deferred | To be defined step by step |
+| **Label vocabulary** | open | Concrete list (e.g. `rest`, `forward`, `back`, `left`, `right`, `up`, `down`) + image paths |
+| **Calibration `.npz` keys** | open | Align with existing `simu_basic` datasets when the recorder is written |
+| **Feature extraction** | open | Shared across models (recommended) vs. per-model |
+| **Model hot-reload trigger** | open | Button only, or also a file watcher? (Same mechanism, different trigger) |
+| **Ps label → motion mapping** | open | Where it lives (YAML vs. Ps code) |
 
 ---
 
@@ -390,10 +387,10 @@ interface with buttons and windows, not a terminal UI.
 
 | Resource | Path |
 |:--|:--|
-| 📄 Ring buffer documentation | `Repo/CircularBuffer.md` |
-| 🐍 Ring implementation | `new_camera/ring/` — `circular_buffer.py`, `estimation_ring.py`, `frame_ring.py` |
-| 🚁 Existing simulator prototype | `simu_basic/main.py` (Ursina) |
-| 📊 Existing datasets | `simu_basic/*.npz` (Shimmer EMG, 15 per class) |
+| Ring buffer documentation | `Repo/CircularBuffer.md` |
+| Ring implementation | `new_camera/ring/` — `circular_buffer.py`, `estimation_ring.py`, `frame_ring.py` |
+| Existing simulator prototype | `simu_basic/main.py` (Ursina) |
+| Existing datasets | `simu_basic/*.npz` (Shimmer EMG, 15 per class) |
 
 ---
 
