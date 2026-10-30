@@ -1,16 +1,15 @@
-# This is a sample Python script.
+"""Entry point for the sEMG → drone project.
 
-# Press Maj+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+Running this file launches **P0**, the orchestrator + GUI. Every other
+process (acquisition, calibration, models, simulator) is spawned by P0.
 
+    python main.py
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+See ``docs/ARCHITECTURE.md`` for the process map and
+``docs/PROJECT_LAYOUT.md`` for the folder structure.
+"""
 
+from p0.app import main
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+if __name__ == "__main__":
+    raise SystemExit(main())
