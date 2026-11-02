@@ -39,21 +39,34 @@ the status bar says *Ready*, and closing the window exits the process with code 
 
 ---
 
-## Step 2 — Layout
+## Step 2 — Layout ✅
 
 **Goal:** replace the placeholder label with the real widget tree.
 
-**Target layout** (see `ARCHITECTURE.md` §7):
+**Files:** `p0/main_window.py`, `p0/widgets/model_table.py`,
+`p0/widgets/status_bar.py`
 
-| Area | Content |
-|:--|:--|
-| **Model table** | One row per `Pm_i` — name, status, last label, last confidence, age of last message |
-| **Selector** | Radio button or dropdown choosing which model feeds Ps |
-| **Buttons** | Reload · Start/Stop calibration · Train · Start/Stop acquisition |
-| **Status bar** | Ring fill level · P1 sample rate · Ps connection state |
+**Layout** (see `ARCHITECTURE.md` §7), top to bottom:
 
-**Done when:** the window shows all four areas with dummy/empty content and
-resizes sensibly.
+1. **Selector** — a `QGroupBox` of radio buttons, one per model, deciding which
+   model feeds Ps. The first model is preselected; `selected_model()` /
+   `select_model(name)` are the accessors.
+2. **Model table** — a read-only `QTableWidget` with the columns *Model ·
+   Status · Last label · Confidence · Age*. The status cell is colour-coded;
+   the *Last label* column stretches on resize.
+3. **Buttons** — *Reload · Start calibration · Train* on the left, *Start
+   acquisition · Start simulator* on the right.
+4. **Status bar** — a message area plus three *permanent* indicators (ring fill,
+   P1 rate, Ps state) so they are not overwritten by `showMessage`.
+
+**Design rule:** the widgets are dumb. They hold state, render it, and emit
+signals — they never touch processes or queues. All three toggle buttons flip
+their own label and a `*_active` flag; the controller connects to them in step 4.
+Dummy data lives in `ModelTable.PLACEHOLDER_ROWS`.
+
+**Done when:** the window shows all four areas with dummy content, resizes
+sensibly, and every control is clickable. ✅ *Verified offscreen: 3 rows, 3 radio
+buttons, buttons toggle their labels, status indicators update.*
 
 ---
 
@@ -61,9 +74,11 @@ resizes sensibly.
 
 **Goal:** a real table backed by a Qt model, not hand-filled widgets.
 
-- A `QAbstractTableModel` exposing one row per model.
+- A `QAbstractTableModel` exposing one row per model, replacing
+  `QTableWidget` + `PLACEHOLDER_ROWS`.
 - A `QTableView` bound to it, with the status column colour-coded
-  (running / training / error / stopped).
+  (running / training / error / stopped) via `QAbstractTableModel.data()` and
+  `ForegroundRole`/`BackgroundRole`.
 - The model is fed from a state snapshot; it never talks to the processes
   directly.
 
