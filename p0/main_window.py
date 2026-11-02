@@ -22,6 +22,18 @@ judged — and clicked — before any process exists.
 
 The simulation itself is *not* drawn here: ``Ps`` is its own process with its
 own window, opened from the simulation pane.
+
+
+  ```
+  p0/
+  ├── app.py            ← starts Qt, creates the window
+  ├── main_window.py    ← assembles the window, owns the buttons, decides what
+  happens on click
+  └── widgets/          ← the rectangles and the status bar, as reusable parts
+      ├── __init__.py
+      ├── model_table.py   ← the left rectangle: the table of models
+      └── status_bar.py    ← the bottom strip: Ring / P1 rate / Ps
+  ```
 """
 
 from __future__ import annotations
@@ -41,11 +53,11 @@ from PySide6.QtWidgets import (
 
 from p0.widgets import ModelTable, StatusBar
 
-#: Width split of the window: models on the left, everything else on the right.
+#: Width split of the window: models on the left, everything else on the right. (%)
 MODELS_SIDE = 60
 CONTROLS_SIDE = 40
 
-#: Height split of the right-hand column: calibration on top, simulation below.
+#: Height split of the right-hand column: calibration on top, simulation below. (%)
 CALIBRATION_SIDE = 40
 SIMULATION_SIDE = 60
 
