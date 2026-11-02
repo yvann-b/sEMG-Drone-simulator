@@ -39,15 +39,19 @@ class StatusBar(QStatusBar):
 
     def set_ring(self, fill_percent: float | None) -> None:
         """Show ring fill as a percentage; ``None`` means “not available”."""
-        self.ring.setText(
-            f"Ring: {self.PLACEHOLDER if fill_percent is None else f'{fill_percent:.0f}%'}"
-        )
+        if fill_percent is None:
+            value = self.PLACEHOLDER
+        else:
+            value = f"{fill_percent:.0f}%"
+        self.ring.setText(f"Ring: {value}")
 
     def set_rate(self, samples_per_second: float | None) -> None:
         """Show the measured P1 sample rate."""
-        self.rate.setText(
-            f"P1 rate: {self.PLACEHOLDER if samples_per_second is None else f'{samples_per_second:.0f} Hz'}"
-        )
+        if samples_per_second is None:
+            value = self.PLACEHOLDER
+        else:
+            value = f"{samples_per_second:.0f} Hz"
+        self.rate.setText(f"P1 rate: {value}")
 
     def set_ps(self, state: str | None) -> None:
         """Show whether the simulator process is connected."""

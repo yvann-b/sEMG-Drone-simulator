@@ -41,32 +41,56 @@ the status bar says *Ready*, and closing the window exits the process with code 
 
 ## Step 2 — Layout ✅
 
-**Goal:** replace the placeholder label with the real widget tree.
+**Goal:** the window's three rectangles. No visual polish (colours, icons,
+themes) — that waits until the backend produces real values to style.
 
 **Files:** `p0/main_window.py`, `p0/widgets/model_table.py`,
 `p0/widgets/status_bar.py`
 
-**Layout** (see `ARCHITECTURE.md` §7), top to bottom:
+**Layout:**
 
-1. **Selector** — a `QGroupBox` of radio buttons, one per model, deciding which
-   model feeds Ps. The first model is preselected; `selected_model()` /
-   `select_model(name)` are the accessors.
-2. **Model table** — a read-only `QTableWidget` with the columns *Model ·
-   Status · Last label · Confidence · Age*. The status cell is colour-coded;
-   the *Last label* column stretches on resize.
-3. **Buttons** — *Reload · Start calibration · Train* on the left, *Start
-   acquisition · Start simulator* on the right.
-4. **Status bar** — a message area plus three *permanent* indicators (ring fill,
-   P1 rate, Ps state) so they are not overwritten by `showMessage`.
+```text
+┌──────────────────────────────┬─────────────────────────────────┐
+│                              │  Calibration                    │
+│  Models                      │  [Start calibration] [Configure…]│
+│  Feeds the simulator: [▾]    │  <plan summary>                 │
+│  ┌────────────────────────┐  ├─────────────────────────────────┤
+│  │ Model │ Status │ …     │  │  Simulation                     │
+│  │ svm   │stopped │ …     │  │  [Start simulator] [Reload]     │
+│  │ lda   │stopped │ …     │  │  [Open simulation view]         │
+│  │ cnn   │stopped │ …     │  │  [Start acquisition] [Train]    │
+│  └────────────────────────┘  │                                 │
+└──────────────────────────────┴─────────────────────────────────┘
+  Ring: —        P1 rate: —        Ps: —
+    60 % width                     40 % width
+```
+
+| Rectangle | Content |
+|:--|:--|
+| **Left, full height (60 %)** | `QComboBox` choosing which model feeds Ps, above the model table |
+| **Top-right (40 % of the height)** | *Start calibration* · *Configure calibration…* + a summary of the planned run |
+| **Bottom-right (60 % of the height)** | *Start simulator* · *Reload* · *Open simulation view*, then *Start acquisition* · *Train* |
+| **Status bar** | Message area + three *permanent* indicators (ring fill, P1 rate, Ps state), so `showMessage` cannot overwrite them |
+
+**Why splitters.** The two divisions are real `QSplitter`s, so 60/40 and 40/60
+are only the *initial* geometry — the user can drag the handles. `setSizes()` is
+a hint that Qt discards on re-layout, so `_apply_ratios()` re-applies the ratios
+from `resizeEvent()`/`showEvent()`; that is what makes them actually hold.
+
+**Not in this window.** The simulation image is *not* drawn in P0 — `Ps` is its
+own process with its own Ursina window, opened by *Open simulation view*.
+Likewise the calibration setup (gestures, repetitions, images) lives behind
+*Configure calibration…* so the main window stays sober.
 
 **Design rule:** the widgets are dumb. They hold state, render it, and emit
-signals — they never touch processes or queues. All three toggle buttons flip
-their own label and a `*_active` flag; the controller connects to them in step 4.
+signals — they never touch processes or queues. The toggle buttons flip their own
+label and a `*_active` flag; the controller connects to them in step 4.
 Dummy data lives in `ModelTable.PLACEHOLDER_ROWS`.
 
-**Done when:** the window shows all four areas with dummy content, resizes
-sensibly, and every control is clickable. ✅ *Verified offscreen: 3 rows, 3 radio
-buttons, buttons toggle their labels, status indicators update.*
+**Done when:** the three rectangles are where they belong at the right ratios,
+resize correctly, and every control is clickable.
+✅ *Verified offscreen at 1100×700 and 1400×800: columns 60/40, rows 40/60;
+selector and all buttons behave; status indicators update.*
 
 ---
 
