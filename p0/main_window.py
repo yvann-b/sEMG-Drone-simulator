@@ -2,7 +2,15 @@
 
 Step 2 of the GUI: the layout. The window is split into three rectangles:
 
+    EMG sensor: [Start acquisition]
     ┌────────────────────────────┬───────────────────────────────┐
+    │                            │  Calibration                  │
+    │  Models                    │  (settings · run · status)    │
+    │  (selector + table)        ├───────────────────────────────┤
+    │                            │  Simulation                   │
+    │                            │  (run · reload · open view)   │
+    └────────────────────────────┴───────────────────────────────┘
+      Ring: —   P1 rate: —   Ps: —
     │                            │  Calibration                  │
     │  Models                    │  (settings · run · status)    │
     │  (selector + table)        ├───────────────────────────────┤
@@ -84,9 +92,12 @@ class MainWindow(QMainWindow):
         self.calibrate_button = QPushButton("Start calibration")
         self.calibration_active = False
         self.calibrate_settings_button = QPushButton("Configure calibration…")
-        self.train_button = QPushButton("Train")
         self.acquisition_button = QPushButton("Start acquisition")
         self.acquisition_active = False
+        self.acquisition_button.setToolTip(
+            "Start / stop reading the sensor. Independent of everything else: "
+            "nothing needs the data, and Ps is simply switched off when it stops."
+        )
         self.simulator_button = QPushButton("Start simulator")
         self.simulator_active = False
         self.open_simulation_button = QPushButton("Open simulation view")
@@ -95,16 +106,35 @@ class MainWindow(QMainWindow):
         central = QWidget()
         outer = QVBoxLayout(central)
         outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(0)
-        outer.addWidget(self._build_layout())
+        outer.setSpacing(8)
+        outer.addWidget(self._build_acquisition_bar())
+        outer.addWidget(self._build_layout(), stretch=1)
         self.setCentralWidget(central)
 
+        self._connect_signals()
         self.calibration_summary = QLabel(CALIBRATION_SUMMARY_PLACEHOLDER)
         self.calibration_summary.setWordWrap(True)
 
         self._connect_signals()
 
     # ------------------------------------------------------------------ build
+
+    def _build_acquisition_bar(self) -> QWidget:
+        """The one control that belongs to no rectangle: read the sensor or not.
+
+        Acquisition is the root of the whole data plane — the ring exists as
+        soon as it runs, and every model reads from it. It is therefore shown
+        above the three panes rather than inside one of them, because it is not
+        part of any single workflow.
+        """
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("EMG sensor:"))
+        layout.addWidget(self.acquisition_button)
+        layout.addStretch(1)
+        return bar
 
     def _build_layout(self) -> QWidget:
         """The three rectangles that make up the window.
@@ -185,7 +215,12 @@ class MainWindow(QMainWindow):
         return pane
 
     def _build_simulation_pane(self) -> QWidget:
-        """Bottom-right pane: train, then run / reload / stop the simulator."""
+        """Bottom-right pane: run / reload / stop the simulator, and open its view.
+
+        There is no *Train* button: a model trains itself on spawn when it was
+        given a dataset, so training is part of starting the model, not a
+        separate action.
+        """
         pane, layout = self._make_pane("Simulation")
 
         sim_row = QHBoxLayout()
@@ -194,12 +229,6 @@ class MainWindow(QMainWindow):
         sim_row.addWidget(self.open_simulation_button)
         sim_row.addStretch(1)
         layout.addLayout(sim_row)
-
-        acq_row = QHBoxLayout()
-        acq_row.addWidget(self.acquisition_button)
-        acq_row.addWidget(self.train_button)
-        acq_row.addStretch(1)
-        layout.addLayout(acq_row)
 
         layout.addStretch(1)
         return pane

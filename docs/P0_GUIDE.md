@@ -41,8 +41,8 @@ the status bar says *Ready*, and closing the window exits the process with code 
 
 ## Step 2 — Layout ✅
 
-**Goal:** the window's three rectangles. No visual polish (colours, icons,
-themes) — that waits until the backend produces real values to style.
+**Goal:** the window's structure. No visual polish (colours, icons, themes) —
+that waits until the backend produces real values to style.
 
 **Files:** `p0/main_window.py`, `p0/widgets/model_table.py`,
 `p0/widgets/status_bar.py`
@@ -50,6 +50,7 @@ themes) — that waits until the backend produces real values to style.
 **Layout:**
 
 ```text
+  EMG sensor: [Start acquisition]
 ┌──────────────────────────────┬─────────────────────────────────┐
 │                              │  Calibration                    │
 │  Models                      │  [Start calibration] [Configure…]│
@@ -58,7 +59,7 @@ themes) — that waits until the backend produces real values to style.
 │  │ Model │ Status │ …     │  │  Simulation                     │
 │  │ svm   │stopped │ …     │  │  [Start simulator] [Reload]     │
 │  │ lda   │stopped │ …     │  │  [Open simulation view]         │
-│  │ cnn   │stopped │ …     │  │  [Start acquisition] [Train]    │
+│  │ cnn   │stopped │ …     │  │                                 │
 │  └────────────────────────┘  │                                 │
 └──────────────────────────────┴─────────────────────────────────┘
   Ring: —        P1 rate: —        Ps: —
@@ -67,10 +68,15 @@ themes) — that waits until the backend produces real values to style.
 
 | Rectangle | Content |
 |:--|:--|
+| **Top bar — no rectangle** | *Start acquisition*: the one global switch. Acquisition is the root of the data plane (the ring exists only while it runs, every model reads from it), so it belongs to no single workflow |
 | **Left, full height (60 %)** | `QComboBox` choosing which model feeds Ps, above the model table |
 | **Top-right (40 % of the height)** | *Start calibration* · *Configure calibration…* + a summary of the planned run |
-| **Bottom-right (60 % of the height)** | *Start simulator* · *Reload* · *Open simulation view*, then *Start acquisition* · *Train* |
+| **Bottom-right (60 % of the height)** | *Start simulator* · *Reload* · *Open simulation view* |
 | **Status bar** | Message area + three *permanent* indicators (ring fill, P1 rate, Ps state), so `showMessage` cannot overwrite them |
+
+**No *Train* button.** A model trains itself on spawn when it was given a
+dataset, so training is part of *starting* the model, not a separate action
+(`ARCHITECTURE.md` §3, Pm_i). Spawning it is already the train action.
 
 **Why splitters.** The two divisions are real `QSplitter`s, so 60/40 and 40/60
 are only the *initial* geometry — the user can drag the handles. `setSizes()` is
