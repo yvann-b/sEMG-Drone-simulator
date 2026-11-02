@@ -83,6 +83,13 @@ are only the *initial* geometry — the user can drag the handles. `setSizes()` 
 a hint that Qt discards on re-layout, so `_apply_ratios()` re-applies the ratios
 from `resizeEvent()`/`showEvent()`; that is what makes them actually hold.
 
+**The handle trap.** Even inside `_apply_ratios()`, size the panes from the *sum
+of the current sizes* (`sum(splitter.sizes())`), never from `splitter.width()`.
+`width()` includes the 2 px drag handles, so sizing from it over-allocates and Qt
+trims the oversized pane: 60/40 silently became 45/55. `_split_by_ratio()` gives
+the clean two-value split and lets the second pane absorb the rounding remainder,
+so the pair always adds up exactly and nothing jumps on resize.
+
 **Not in this window.** The simulation image is *not* drawn in P0 — `Ps` is its
 own process with its own Ursina window, opened by *Open simulation view*.
 Likewise the calibration setup (gestures, repetitions, images) lives behind
@@ -95,7 +102,7 @@ Dummy data lives in `ModelTable.PLACEHOLDER_ROWS`.
 
 **Done when:** the three rectangles are where they belong at the right ratios,
 resize correctly, and every control is clickable.
-✅ *Verified offscreen at 1100×700 and 1400×800: columns 60/40, rows 40/60;
+✅ *Verified offscreen at 1100×700 and 1400×800: columns 59.9/40.1, rows 40/60;
 selector and all buttons behave; status indicators update.*
 
 ---

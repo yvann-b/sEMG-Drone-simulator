@@ -11,14 +11,6 @@ Step 2 of the GUI: the layout. The window is split into three rectangles:
     │                            │  (run · reload · open view)   │
     └────────────────────────────┴───────────────────────────────┘
       Ring: —   P1 rate: —   Ps: —
-    │                            │  Calibration                  │
-    │  Models                    │  (settings · run · status)    │
-    │  (selector + table)        ├───────────────────────────────┤
-    │                            │  Simulation                   │
-    │                            │  (train · run · open view)    │
-    └────────────────────────────┴───────────────────────────────┘
-      Ring: —   P1 rate: —   Ps: —
-
 The left column is 60% of the width and uses the full height. The right column
 takes the remaining 40% and is split 40/60 between calibration (top) and
 simulation (bottom). Both divisions are real ``QSplitter``s, so the ratios are
@@ -56,6 +48,19 @@ CONTROLS_SIDE = 40
 #: Height split of the right-hand column: calibration on top, simulation below.
 CALIBRATION_SIDE = 40
 SIMULATION_SIDE = 60
+
+
+def _split_by_ratio(total: int, first: int, second: int) -> list[int]:
+    """Split ``total`` into two integers following ``first:second``.
+
+    The last pane absorbs the rounding remainder so the two values always add
+    up to ``total`` exactly; otherwise a one-pixel gap shows up as a jump when
+    the window is resized.
+    """
+    share = first + second
+    first_size = total * first // share
+    return [first_size, total - first_size]
+
 
 #: Placeholder text for the calibration pane until a run is described.
 CALIBRATION_SUMMARY_PLACEHOLDER = (
@@ -110,10 +115,6 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_acquisition_bar())
         outer.addWidget(self._build_layout(), stretch=1)
         self.setCentralWidget(central)
-
-        self._connect_signals()
-        self.calibration_summary = QLabel(CALIBRATION_SUMMARY_PLACEHOLDER)
-        self.calibration_summary.setWordWrap(True)
 
         self._connect_signals()
 
@@ -289,21 +290,19 @@ class MainWindow(QMainWindow):
         self._apply_ratios()
 
     def _apply_ratios(self) -> None:
+        """Re-impose the target ratios after Qt recomputed the sizes.
+
+        The ratios are computed from the *sum of the current sizes* rather
+        than from ``splitter.width()``. ``width()`` includes the splitter
+        handles, so sizing from it makes Qt shrink the panes to fit the
+        handles and the ratios drift (60/40 collapsed to 45/55). The sizes
+        sum to the space actually shared between the panes, handles excluded.
+        """
         self._columns.setSizes(
-            [
-                self._columns.width() * MODELS_SIDE // (MODELS_SIDE + CONTROLS_SIDE),
-                self._columns.width() * CONTROLS_SIDE // (MODELS_SIDE + CONTROLS_SIDE),
-            ]
+            _split_by_ratio(sum(self._columns.sizes()), MODELS_SIDE, CONTROLS_SIDE)
         )
         self._rows.setSizes(
-            [
-                self._rows.height()
-                * CALIBRATION_SIDE
-                // (CALIBRATION_SIDE + SIMULATION_SIDE),
-                self._rows.height()
-                * SIMULATION_SIDE
-                // (CALIBRATION_SIDE + SIMULATION_SIDE),
-            ]
+            _split_by_ratio(sum(self._rows.sizes()), CALIBRATION_SIDE, SIMULATION_SIDE)
         )
 
     def selected_model(self) -> str | None:
