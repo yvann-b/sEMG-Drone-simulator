@@ -1,1 +1,11 @@
 .cecli/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor / IDE local settings
+.vscode/
+.idea/
+
