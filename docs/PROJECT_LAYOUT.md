@@ -15,24 +15,31 @@
 
 **One top-level folder per process.** A process folder contains everything that
 runs *inside* that process and nothing else. Code shared by two or more
-processes goes in `common/` — and `common/` must never import from a process
-folder (dependencies point **inward**, toward `common/`).
+processes goes in `utils/` — and `utils/` must never import from a process
+folder (dependencies point **inward**, toward `utils/`).
 
 ```
-process folder  ──imports──▶  common/
-process folder  ──imports──▶  common/
-common/         ──imports──▶  (nothing of ours)
+process folder  ──imports──▶  utils/
+process folder  ──imports──▶  utils/
+utils/          ──imports──▶  (nothing of ours)
 ```
 
 This keeps the process map in `ARCHITECTURE.md` and the folder tree here
 **isomorphic**: one box in the diagram = one folder on disk.
 
+> **Why `utils/` and not `common/`.** The ring layer
+> (`circular_buffer.py`, `shimmer_ring.py`, `emg_accel_ring.py`, `imu_ring.py`)
+> and its tests already live in `utils/` and are green. The role is the same —
+> shared, process-agnostic code — only the folder name differs. Renaming the
+> folder and rewriting every import would buy nothing and would churn tested
+> code.
+
 ---
 
 ## 2. Target tree
 
-Folders marked `[P0]` exist today. The rest are created when their process is
-written — **do not create empty folders in advance**.
+Folders marked `[EXISTS]` exist today. The rest are created when their process
+is written — **do not create empty folders in advance**.
 
 ```text
 PythonProject/
@@ -40,7 +47,7 @@ PythonProject/
 ├── main.py                     # entry point: launches P0
 ├── pyproject.toml              # deps + tool config
 │
-├── p0/                         # [P0] Orchestrator + GUI
+├── p0/                         # [EXISTS] Orchestrator + GUI
 │   ├── __init__.py
 │   ├── __main__.py             # `python -m p0`
 │   ├── app.py                  # QApplication bootstrap
@@ -50,7 +57,7 @@ PythonProject/
 │   └── widgets/                # custom widgets (model table, status bar)
 │       └── __init__.py
 │
-├── acquisition/                # [P1] Bluetooth sEMG driver → ring
+├── acquisition/                # [P1] Bluetooth sEMG driver → ring(s)
 │   ├── __init__.py
 │   ├── __main__.py
 │   └── driver.py
@@ -72,18 +79,14 @@ PythonProject/
 │   ├── __main__.py
 │   └── drone.py
 │
-├── common/                     # shared by ≥2 processes
-│   ├── __init__.py
-│   ├── ring/                   # EmgRing (CircularBuffer subclass)
-│   │   ├── __init__.py
-│   │   └── emg_ring.py
-│   ├── ipc/                    # message schemas + queue helpers
-│   │   ├── __init__.py
-│   │   └── messages.py
-│   └── config.py               # YAML loading
-│
-├── config/
-│   └── app.yaml                # label vocabulary, model list, timings
+├── utils/                      # [EXISTS] shared by ≥2 processes
+│   ├── circular_buffer.py      # raw byte ring (unchanged)
+│   ├── shimmer_ring.py         # typed layer: dtype → item_size
+│   ├── emg_accel_ring.py       # ONE per Shimmer: emg[2] + accel[3]  (28 B)
+│   ├── imu_ring.py             # accel / gyro / mag triad             (44 B)
+│   └── ipc/                    # message schemas + queue helpers (to add)
+│       ├── __init__.py
+│       └── messages.py
 │
 ├── data/                       # calibration datasets (git-ignored)
 ├── docs/
@@ -91,7 +94,14 @@ PythonProject/
 │   ├── PROJECT_LAYOUT.md       # ← this file
 │   └── P0_GUIDE.md             # step-by-step GUI tutorial
 └── tests/
+    └── test_shimmer_ring.py    # [EXISTS]
 ```
+
+> **No `config/` folder.** There is no central config file: each model's label
+> vocabulary travels inside its calibration `.npz`, so two models may
+> legitimately use different gesture sets. The few remaining constants
+> (`NUMBER_SHIMMER`, tick interval, ring capacity) are hardcoded at the top of
+> the module that owns them, keeping `python -m p0` runnable with zero setup.
 
 ---
 
@@ -99,12 +109,12 @@ PythonProject/
 
 | Folder | Process | Owns | Never does |
 |:--|:--|:--|:--|
-| `p0/` | **P0** | Window, control loop, ring handle, spawning | Signal processing, model maths |
-| `acquisition/` | **P1** | Bluetooth link, sample timestamps | Know who reads the ring |
+| `p0/` | **P0** | Window, control loop, ring handles, spawning | Signal processing, model maths |
+| `acquisition/` | **P1** | Bluetooth link, sample timestamps, one ring per Shimmer | Know who reads the rings |
 | `calibration/` | **Pc** | Recording a labelled dataset | Train anything |
 | `models/` | **Pm_i** | `fit` / `load` / `predict` per model | Touch the ring, queues or disk |
-| `simulator/` | **Ps** | 3D scene, label → motion | Read the ring |
-| `common/` | — | Ring, message schemas, config | Import from a process folder |
+| `simulator/` | **Ps** | 3D scene, label → motion | Read the rings |
+| `utils/` | — | Rings, message schemas, small constants | Import from a process folder |
 
 ---
 
@@ -112,14 +122,14 @@ PythonProject/
 
 | From | May import |
 |:--|:--|
-| `p0/` | `common/`, `models/` (only to read the plugin list) |
-| `acquisition/`, `calibration/`, `simulator/` | `common/` |
-| `models/` | `common/` (types only) |
-| `common/` | stdlib + numpy |
+| `p0/` | `utils/`, `models/` (only to read the plugin list) |
+| `acquisition/`, `calibration/`, `simulator/` | `utils/` |
+| `models/` | `utils/` (types only) |
+| `utils/` | stdlib + numpy |
 
 > **No process imports another process.** If two processes need the same code,
-> it moves to `common/`. This is what keeps the star topology honest: the only
-> runtime links between processes are the **ring** and the **queues**.
+> it moves to `utils/`. This is what keeps the star topology honest: the only
+> runtime links between processes are the **rings** and the **queues**.
 
 ---
 

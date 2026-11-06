@@ -1,20 +1,35 @@
-"""The model table: one row per ``Pm_i`` process.
+"""The model table, as a Qt *data model* (not a widget).
 
-Step 2 fills it with placeholder rows so the layout can be judged. Step 3 will
-replace the placeholder storage with a ``QAbstractTableModel`` fed by a state
-snapshot from the controller.
+Step 3 swaps ``QTableWidget`` for a ``QAbstractTableModel``. The difference is
+who owns the numbers:
+
+    before:  QTableWidget held the rows, the controller had to find a cell
+             and write into it (the widget *was* the database).
+    after:   this model holds the rows, the controller calls
+             ``apply_snapshot(rows)`` once per tick, and the view only paints.
+
+The table stays **read-only**: rows change because the controller says so,
+never because the user types. Editing is a property of the view, and the
+controller never touches the view.
+
+Why a model and not a widget:
+
+* ``data()`` is asked on demand, so *Age* is computed from ``now`` at paint
+  time instead of being stored and rewritten every tick.
+* one ``apply_snapshot`` + a single ``dataChanged`` repaints what changed,
+  instead of looping over every cell of every row.
+* "which rows exist" is ``row_names()``, real data the combo box can use,
+  instead of reading text back out of a view.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from collections.abc import Sequence
+
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QHeaderView,
-    QTableWidget,
-    QTableWidgetItem,
-)
+
+from p0.state import EM_DASH, ModelRow, format_age
 
 #: Column index -> header label. Order matters: the view builds columns from it.
 COLUMNS: tuple[str, ...] = (
@@ -33,108 +48,137 @@ STATUS_COLORS: dict[str, QColor] = {
     "training": QColor("#fdecc8"),
     "error": QColor("#fbd8d6"),
     "stopped": QColor("#e8e8e8"),
+    "idle": QColor("#f0f0f0"),
 }
 
-#: Placeholder content for step 2 — replaced by real model processes in step 3.
-PLACEHOLDER_ROWS: tuple[tuple[str, str, str, str, str], ...] = (
-    ("svm", "stopped", "—", "—", "—"),
-    ("lda", "stopped", "—", "—", "—"),
-    ("cnn", "stopped", "—", "—", "—"),
+#: Placeholder rows shown before the controller's first snapshot. They live
+#: in the *model* now (they used to live in the widget), so the window looks
+#: exactly the same while the controller is still being wired in.
+PLACEHOLDER_ROWS: tuple[ModelRow, ...] = (
+    ModelRow(name="svm", status="idle"),
+    ModelRow(name="lda", status="idle"),
+    ModelRow(name="cnn", status="idle"),
 )
 
 
-class ModelTable(QTableWidget):
-    """Read-only table of every model process and its last classification.
+class ModelTableModel(QAbstractTableModel):
+    """Read-only table of every model process and its last classification."""
 
-    The table is non-editable and row-selecting: a single click picks a model
-    (used later by the selector and by reload). Editing happens through code,
-    never through the keyboard.
-    """
+    def __init__(self, parent=None, rows: Sequence[ModelRow] | None = None) -> None:
+        super().__init__(parent)
+        # ``now`` is the clock the Age column is measured against. The
+        # controller stamps it into the snapshot each tick; until then, no
+        # age can be shown and the cell reads "—".
+        self._now: float | None = None
+        self._rows: list[ModelRow] = list(rows if rows is not None else PLACEHOLDER_ROWS)
 
-    def __init__(self, parent=None) -> None:
-        # 0 rows for now, one column per entry in COLUMNS. Pass len(COLUMNS)
-        # rather than 5 so adding a column is a one-line change in COLUMNS.
-        super().__init__(0, len(COLUMNS), parent)
+    # ------------------------------------------------------------------ data
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        # A flat table: no index ever has children.
+        return 0 if parent.isValid() else len(self._rows)
 
-        self.setHorizontalHeaderLabels(COLUMNS)
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(COLUMNS)
 
-        # --- how the user may interact -------------------------------
-        # Double-clicking a cell would normally open an editor. Model rows are
-        # fed by code, never typed by hand, so editing is disabled outright.
-        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        # A click selects the whole row (a model), not the single cell under
-        # the cursor, and only one row at a time: the selection is "which model
-        # is this", there is no multi-model action anywhere.
-        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        # Zebra striping: with 5 columns the eye loses the row between two
-        # distant cells. The alternation keeps a line readable across.
-        self.setAlternatingRowColors(True)
-        # Row numbers on the left would be noise: a row is identified by its
-        # model name, not by its index.
-        self.verticalHeader().setVisible(False)
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        column = index.column()
 
-        # --- column widths -------------------------------------------
-        # ResizeToContents: the column fits its widest text and grows with it.
-        # Stretch: the column absorbs all the leftover width, so exactly one
-        # column may use it -- here the free-text one, Last label. Give a
-        # second column Stretch and Qt would share the slack between them.
-        header = self.horizontalHeader()
-        header.setSectionResizeMode(COL_MODEL, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_LABEL, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(COL_CONFIDENCE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_AGE, QHeaderView.ResizeMode.ResizeToContents)
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            return self._text(row, column)
 
-        # Step 2 only: real data arrives in step 3, from the controller.
-        self.set_placeholder_data()
+        if role == Qt.ItemDataRole.BackgroundRole and column == COL_STATUS:
+            # Unknown / missing status: no colour, the default background.
+            return STATUS_COLORS.get(row.status)
 
-    def set_placeholder_data(self) -> None:
-        """Fill the table with the step-2 dummy rows.
-
-        Testing aid only: this is what step 3 replaces with real rows coming
-        from the controller. Clearing first (``setRowCount(0)``) makes the
-        method safe to call twice -- otherwise each call would append again.
-        """
-        self.setRowCount(0)
-        for row in PLACEHOLDER_ROWS:
-            self._append_row(row)
-
-    def _append_row(self, values: tuple[str, str, str, str, str]) -> None:
-        """Add one brand-new row at the bottom and fill its cells.
-
-        Nothing is edited here: the row does not exist yet, it is *created*.
-        ``rowCount()`` is the number of existing rows, which is also the index
-        where the next one goes -- hence a new row always lands at the end.
-        """
-        row = self.rowCount()
-        self.insertRow(row)
-        for column, value in enumerate(values):
-            item = QTableWidgetItem(value)
-            # Keep the raw model name on the item itself. The visible text is
-            # what the user reads; this role is for code that needs the "name
-            # without decoration" later (step 3/4), and survives any relabel.
+        if role == Qt.ItemDataRole.TextAlignmentRole:
             if column == COL_MODEL:
-                item.setData(Qt.ItemDataRole.UserRole, value)
-            # Only the wide text column is left-aligned; short values (status,
-            # confidence, age) look tidier centred under their header.
-            if column in (COL_STATUS, COL_LABEL, COL_CONFIDENCE, COL_AGE):
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row, column, item)
-        # Colour depends on the status text, so it must run after the cells
-        # hold their values -- never before.
-        self._paint_status(row)
+                return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            return int(Qt.AlignmentFlag.AlignCenter)
 
-    def _paint_status(self, row: int) -> None:
-        """Colour the Status cell according to the status word it contains.
+        if role == Qt.ItemDataRole.UserRole:
+            # The raw model name, undecorated. Code needs this identity; the
+            # visible text is for a human.
+            return row.name
 
-        Cosmetic only: the data is already correct before this runs, and
-        deleting every call would leave a valid, merely colourless table.
-        An unknown status (or an empty cell) is simply left unpainted.
+        return None
+
+    def _text(self, row: ModelRow, column: int) -> str:
+        if column == COL_MODEL:
+            return row.name
+        if column == COL_STATUS:
+            return row.status
+        if column == COL_LABEL:
+            return row.display_label()
+        if column == COL_CONFIDENCE:
+            return row.display_confidence()
+        if column == COL_AGE:
+            return format_age(row.last_seen, self._now)
+        return EM_DASH
+
+    def headerData(  # noqa: N802
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return COLUMNS[section] if 0 <= section < len(COLUMNS) else None
+        return None
+
+    # ------------------------------------------------------------- the API
+    def apply_snapshot(self, rows: Sequence[ModelRow], now: float | None = None) -> None:
+        """Replace the whole table with ``rows``.
+
+        Called by the controller once per tick. ``now`` (monotonic seconds) is
+        what the Age column is measured against.
+
+        Emits the *smallest* correct ``dataChanged``: if the set of names is
+        unchanged, only the fields that actually moved trigger a repaint, and
+        a status change does not force the whole table to be rebuilt.
         """
-        item = self.item(row, COL_STATUS)
-        if item is None:
+        rows = list(rows)
+        self._now = now
+
+        new_names = [r.name for r in rows]
+        old_names = [r.name for r in self._rows]
+
+        if new_names != old_names:
+            # Different rows exist: rebuild once, with the right signal.
+            self.beginResetModel()
+            self._rows = rows
+            self.endResetModel()
             return
-        color = STATUS_COLORS.get(item.text().lower())
-        if color is not None:
-            item.setBackground(color)
+
+        old_rows = self._rows
+        self._rows = rows
+        if not rows:
+            return
+        # Same rows, possibly changed content. Repaint the columns that moved.
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(len(rows) - 1, len(COLUMNS) - 1),
+            [
+                Qt.ItemDataRole.DisplayRole,
+                Qt.ItemDataRole.BackgroundRole,
+            ],
+        )
+        # ``old_rows`` is intentionally only used to keep the signature
+        # identical to the rebuild branch; the view recomputes from ``_rows``.
+        _ = old_rows
+
+    def row_names(self) -> list[str]:
+        """The model names currently listed, in order."""
+        return [row.name for row in self._rows]
+
+    def rows(self) -> tuple[ModelRow, ...]:
+        """The current rows, for tests and for the controller's own reads."""
+        return tuple(self._rows)
+
+    def reset_to_placeholders(self) -> None:
+        """Testing aid: restore the step-2 dummy rows."""
+        self.apply_snapshot(PLACEHOLDER_ROWS, now=None)

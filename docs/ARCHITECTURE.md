@@ -8,8 +8,10 @@
 </div>
 
 > **Scope.** This document fixes the **global process architecture** and the
-> **inter-process contracts** only. The YAML schema, feature-extraction details,
-> and model internals are deliberately out of scope and will be defined step by step.
+> **inter-process contracts** only. The calibration file layout,
+> feature-extraction details, and model internals are deliberately out of scope
+> and will be defined step by step. There is no central config file: each
+> model's label vocabulary travels with its calibration dataset.
 
 ---
 
@@ -30,17 +32,33 @@
 
 ## 1. Overview
 
-The system reads **4-channel sEMG** from a Bluetooth sensor, classifies the
-wearer's movement, and drives a **simulated drone**. It is built as a **star
-topology**:
+The system reads **sEMG + low-noise accelerometer** from one or more Bluetooth
+Shimmer sensors, classifies the wearer's movement, and drives a **simulated
+drone**. It is built as a **star topology**:
 
 | Plane | Component | Role |
 |:--|:--|:--|
+| **Data** | **SHM circular buffers** | **One ring per Shimmer** — single-producer / multi-consumer |
 | **Control** | **P0** — orchestrator + GUI | Process lifecycle, model selection, command routing |
-| **Data** | **SHM circular buffer** | Single-producer / multi-consumer ring of raw EMG samples |
 
 Every other process is a **pure producer** or a **pure consumer** of one of those
-two planes. No process talks to another except through **P0** or through the **ring**.
+two planes. No process talks to another except through **P0** or through the **rings**.
+
+### Sensors and rings
+
+Each Shimmer exposes **2 EMG channels + a 3-axis low-noise accelerometer**.
+Acquisition writes that pair into **one `EmgAccelRing` per Shimmer**:
+
+| Ring | Slot | Size | Feeds |
+|:--|:--|--:|:--|
+| `EmgAccelRing` × N | `timestamp_ns`, `emg[2]`, `accel[3]` | 28 B | models |
+| `ImuRing` × N | `timestamp_ns`, `accel[3]`, `gyro[3]`, `mag[3]` | 44 B | orientation (Madgwick) — later |
+
+`N = NUMBER_SHIMMER`, a constant (default **1** for the current tests).
+
+`EmgAccelRing` **duplicates** the accelerometer (it is also in `ImuRing`) on
+purpose: a model reads its whole window from ONE ring, avoiding a cross-ring
+timestamp join and avoiding copying gyro/mag bytes it would discard.
 
 ### Design principles
 
@@ -64,20 +82,22 @@ two planes. No process talks to another except through **P0** or through the **r
 flowchart TB
     subgraph P0["P0 — Orchestrator + GUI (PySide6)"]
         direction LR
-        UI["GUI<br/>model table · selector<br/>reload · calibrate · train"]
+        UI["GUI<br/>model table · selector<br/>reload · calibrate"]
         CTRL["Control loop (QTimer tick)<br/>drain queues · route to Ps<br/>check deadlines · watch files"]
-        RINGOWN["Owns SHM ring handle<br/>is_creating=True<br/>kept alive for session"]
+        RINGOWN["Owns N ring handles<br/>is_creating=True<br/>kept alive for session"]
         UI <--> CTRL
         CTRL --- RINGOWN
     end
 
-    subgraph DATA["Data plane — SHM circular buffer"]
-        RING[("EmgRing<br/>━━━━━━━━━━<br/>timestamp_ns : int64<br/>emg : float32[4]<br/>━━━━━━━━━━<br/>24 bytes / slot")]
+    subgraph DATA["Data plane — one EmgAccelRing per Shimmer"]
+        direction LR
+        RING1[("EmgRing[0]<br/>━━━━━━━━━━<br/>timestamp_ns : int64<br/>emg : float32[2]<br/>accel : float32[3]<br/>━━━━━━━━━━<br/>28 bytes / slot")]
+        RINGN[("EmgRing[N-1]<br/>━━━━━━━━━━<br/>… same layout …")]
     end
 
     subgraph PROCS["Worker processes"]
         direction LR
-        P1["P1 — Acquisition<br/>Bluetooth sEMG driver"]
+        P1["P1 — Acquisition<br/>Bluetooth Shimmer driver"]
         PC["Pc — Calibration<br/>read_fifo → .npz"]
         PM1["Pm1 — model A"]
         PM2["Pm2 — model B"]
@@ -92,12 +112,14 @@ flowchart TB
         SRC[("models/*.py")]
     end
 
-    RINGOWN ==>|"creates + passes at spawn"| RING
-    P1 -->|"write()"| RING
-    RING -->|"read_next_fifo('calib')<br/>abort if gap > 0"| PC
-    RING -->|"read_last_n(N)"| PM1
-    RING -->|"read_last_n(N)"| PM2
-    RING -->|"read_last_n(N)"| PMN
+    RINGOWN ==>|"creates N rings + passes at spawn"| RING1
+    RINGOWN ==>|"…"| RINGN
+    P1 -->|"write() → ring[i]"| RING1
+    P1 -->|"write() → ring[i]"| RINGN
+    RING1 -->|"read_next_fifo('calib')<br/>abort if gap > 0"| PC
+    RING1 -->|"read_last_n(N)"| PM1
+    RING1 -->|"read_last_n(N)"| PM2
+    RING1 -->|"read_last_n(N)"| PMN
 
     PC -->|"writes"| CALIB
     CALIB -->|"train (offline, on demand)"| WEIGHTS
@@ -125,7 +147,7 @@ flowchart TB
     classDef worker fill:#e6f4ea,stroke:#137333,stroke-width:1.5px,color:#0d5227
     classDef disk fill:#fef7e0,stroke:#f9ab00,stroke-width:1.5px,color:#7a5200
     class UI,CTRL,RINGOWN control
-    class RING data
+    class RING1,RINGN data
     class P1,PC,PM1,PM2,PMN,PS worker
     class CALIB,WEIGHTS,SRC disk
 ```
@@ -140,9 +162,9 @@ flowchart TB
 
 | Responsibility | Detail |
 |:--|:--|
-| **Read config** | YAML at startup (schema TBD) |
-| **Create the ring** | `EmgRing(..., is_creating=True)` — **keeps the handle alive for the whole session**, otherwise the SHM segment may be unlinked |
-| **Spawn children** | Passes the ring object (pickled) and each child's own `mp.Queue` at spawn |
+| **Constants** | `NUMBER_SHIMMER`, tick interval, ring capacity are module-level constants — no config file |
+| **Create the rings** | `EmgAccelRing(f"emg_ring_{i}", …, is_creating=True)` for `i in range(NUMBER_SHIMMER)` — **keeps every handle alive for the whole session**, otherwise the SHM segments may be unlinked |
+| **Spawn children** | Passes the ring objects (pickled) and each child's own `mp.Queue` at spawn |
 | **Control loop** | `QTimer` tick (~50 ms): drain every `Queue_i` non-blocking, update UI state, forward the selected model's label to `Queue_Ps` with a deadline, check deadlines, poll the file watcher |
 | **Model selector** | GUI action — changes which `Queue_i` feeds `Queue_Ps` |
 | **Reload button** | Diffs model source files against last-loaded hashes; kills and respawns **only** the changed `Pm_i` |
@@ -155,8 +177,10 @@ flowchart TB
 
 ### P1 — Acquisition
 
-- Talks to the Bluetooth sEMG sensor.
-- Writes one slot per sample: `write(record)`.
+- Talks to the Bluetooth Shimmer sensor(s), `NUMBER_SHIMMER` of them.
+- Owns **one `EmgAccelRing` per Shimmer**; for each sample it calls
+  `ring[i].write(record)` with `emg[2]` and `accel[3]`.
+- A ring's name carries its index: `emg_ring_0`, `emg_ring_1`, …
 - Knows nothing about consumers. Runs whether or not anyone reads.
 
 ### Pc — Calibration
@@ -165,7 +189,7 @@ flowchart TB
 - Reads the ring with `read_next_fifo("calib")`.
 - **Aborts with an error if `gap > 0`** — a gap means samples were lost and the
   calibration dataset would be silently corrupt.
-- Writes `data/calib_*.npz` (format follows the existing `simu_basic` datasets).
+- Writes `data/calib_<model>_<timestamp>.npz` (see §4.4).
 - Exits when the user stops the recording.
 
 ### Pm_i — Model process (one per model)
@@ -192,36 +216,45 @@ Two launch modes:
 `read_last_n` returns `(structured_array, overrun)`; `overrun` may be ignored
 (the model only cares about the most recent window).
 
+> **The model's label set is read from its own `.npz`.** Two models may
+> legitimately use different gesture lists; nothing global fixes them.
+
 ### Ps — Simulator
 
 - Ursina 3D app (already prototyped in `simu_basic/main.py`).
-- **Never touches the ring.**
+- **Never touches the rings.**
 - Reads `Queue_Ps` only: `{label, deadline}`.
 - Applies the last command until its deadline; on expiry, falls back to `rest`.
-- Maps label → drone motion (label vocabulary defined in YAML).
+- Maps label → drone motion (label set defined by Ps, see §9).
 
 ---
 
 ## 4. IPC contracts
 
-### 4.1 SHM ring — data plane
+### 4.1 SHM rings — data plane
 
-Reuses the existing `CircularBuffer` from `new_camera/ring/circular_buffer.py`
-**unchanged**. A new `EmgRing` subclass follows the `estimation_ring.py` template.
+Reuses `utils/circular_buffer.py` and the typed layer `utils/shimmer_ring.py`
+**unchanged**. The concrete rings already exist: `EmgAccelRing` and `ImuRing`.
 
-**Slot layout** — no accelerometer for now:
+**Slot layout — one ring per Shimmer** (already implemented in
+`utils/emg_accel_ring.py`):
 
 ```python
-emg_slot_dtype = np.dtype([
+EMG_ACCEL_DTYPE = np.dtype([
     ('timestamp_ns', np.int64),
-    ('emg',          np.float32, (4,)),
+    ('emg',          np.float32, (2,)),   # 2 EMG channels (Shimmer ExG chip 1)
+    ('accel',        np.float32, (3,)),   # low-noise accelerometer
 ])
-# item_size = 8 + 16 = 24 bytes
+# item_size = 8 + 8 + 12 = 28 bytes
 ```
 
 > `item_size` is derived from `slot_dtype.itemsize` — **never hand-counted**.
 
-**Consumer usage:**
+**How many rings.** `NUMBER_SHIMMER` (default 1) → that many `EmgAccelRing`s,
+named `emg_ring_0 … emg_ring_{NUMBER_SHIMMER-1}`. The count is a constant owned
+by P0, not a config file.
+
+**Consumer usage** (per ring index `i`):
 
 | Consumer | Method | Returns | Policy |
 |:--|:--|:--|:--|
@@ -233,8 +266,8 @@ emg_slot_dtype = np.dtype([
 **Lifecycle notes** (from the existing implementation):
 
 - `write_count` is a `Value('Q', 0, lock=False)` and **cannot be attached by
-  name** — it must be passed explicitly. P0 creates the ring and passes the
-  object to every child at spawn; pickling handles `_view` reattachment via
+  name** — it must be passed explicitly. P0 creates each ring and passes the
+  objects to every child at spawn; pickling handles `_view` reattachment via
   `__getstate__` / `__setstate__`.
 - `write_count` is **linear and monotonic** — never wraps. This is what makes
   "same slot, new data" unambiguous.
@@ -248,7 +281,7 @@ One `mp.Queue` per model, created by P0 and passed at spawn.
 {
     "model":      "svm",      # str   — model name
     "t":          1234.567,   # float — monotonic timestamp (s)
-    "label":      "flex",     # str   — from the YAML label vocabulary
+    "label":      "flex",     # str   — from the model's own calibration vocabulary
     "confidence": 0.87,       # float | None
     "seq":        42,         # int   — per-model counter (detect stalls/drops)
 }
@@ -263,7 +296,7 @@ One `mp.Queue`, created by P0.
 
 ```python
 {
-    "label":    "forward",    # str   — from the YAML label vocabulary
+    "label":    "forward",    # str   — must exist in the producing model's vocabulary
     "deadline": 1234.617,     # float — monotonic time after which Ps falls back to rest
     "model":    "svm",        # str   — display / debug only
 }
@@ -276,12 +309,22 @@ One `mp.Queue`, created by P0.
 
 ### 4.4 Pc → disk — calibration dataset
 
-`data/calib_<timestamp>.npz`, following the existing `simu_basic` dataset layout
-(produced today by the Shimmer acquisition pipeline).
+`data/calib_<model>_<timestamp>.npz`.
 
-> Exact keys to be confirmed when the calibration recorder is written. The
-> constraint: it must be loadable by the same offline analysis code used on the
-> existing `.npz` files.
+**The dataset owns the label vocabulary.** Each capture records the gesture list
+for *that* model — `calib_svm.npz` may hold 5 gestures, `calib_cnn.npz` 6.
+There is no global vocabulary and no config file: two models are allowed to
+disagree, which is what makes experimenting cheap.
+
+Constraints on the file:
+
+- `labels` — the ordered list of gesture names used in this capture.
+- A `rest` label **must** be present in every dataset: it is Ps's fallback when
+  a command expires (§4.3).
+- Raw windows + labels + block ids, loadable by the existing offline code.
+
+> Current keys in `hand_gesture_recognition_v1.py` are `X`, `y`, `blocks`,
+> `sampling_rate`, `labels_map`; the recorder should stay compatible with them.
 
 ---
 
@@ -317,8 +360,8 @@ def predict(window) -> (label, confidence)     # window: structured array from r
 2. On reload (button press, or file-watcher event), P0 re-hashes every model source.
 3. For each changed file: **kill that `Pm_i`**, respawn it **with the same launch
    arguments it had before** (same `model.py`, same `weights.pkl` or `data.npz`).
-4. Unchanged models keep running untouched. The ring is untouched (shared memory
-   survives process death). The new `Pm_i` reads the ring from "now" onward.
+4. Unchanged models keep running untouched. The rings are untouched (shared
+   memory survives process death). The new `Pm_i` reads from "now" onward.
 
 > **Code vs. weights.** A `.py` change **respawns only**. Retraining is a
 > separate, explicit action — otherwise every typo fix would kick off a training run.
@@ -330,13 +373,13 @@ def predict(window) -> (label, confidence)     # window: structured array from r
 **Framework: PySide6 (Qt)** — chosen because the user wants a real graphical
 interface with buttons and windows, not a terminal UI.
 
-**Proposed layout:**
+**Layout:**
 
 | Area | Content |
 |:--|:--|
 | **Model table** | One row per `Pm_i` — name, status (running / training / error / stopped), last label, last confidence, age of last message |
-| **Selector** | Radio button or dropdown choosing which model feeds Ps |
-| **Buttons** | Reload · Start/Stop calibration · Train · Start/Stop acquisition |
+| **Selector** | Dropdown choosing which model feeds Ps |
+| **Buttons** | Reload · Start/Stop calibration · Configure calibration… · Start/Stop acquisition · Start/Stop simulator · Open simulation view |
 | **Status bar** | Ring fill level · P1 sample rate · Ps connection state |
 
 > **Concurrency.** The control loop runs on a `QTimer` tick; the GUI reads a
@@ -352,8 +395,8 @@ interface with buttons and windows, not a terminal UI.
 
 | # | Decision | Rationale |
 |:-:|:--|:--|
-| 1 | Star topology: P0 control plane, SHM ring data plane | Decouples acquisition from analysis; models are independent |
-| 2 | Ps never reads the ring | Simulator stays dumb; P0 is the only router |
+| 1 | Star topology: P0 control plane, SHM rings data plane | Decouples acquisition from analysis; models are independent |
+| 2 | Ps never reads the rings | Simulator stays dumb; P0 is the only router |
 | 3 | One `mp.Queue` per `Pm_i` | P0 knows the sender without parsing; a dead model can't corrupt another's stream |
 | 4 | `mp.Queue` for Pm→P0 and P0→Ps | Message rates are a few Hz; queues are trivially sufficient |
 | 5 | Linear Pm lifecycle, no state machine | Calibration is a file; the model loop is just train → load → loop |
@@ -361,12 +404,15 @@ interface with buttons and windows, not a terminal UI.
 | 7 | Reload = diff + respawn changed `Pm_i` only | No Python restart, no re-selecting files; robust vs. in-process reload |
 | 8 | Code and weights are separate artifacts | Editing code shouldn't trigger training |
 | 9 | Command expiry with deadline stamped by P0 | Handles model death, switching, and low confidence uniformly |
-| 10 | Discrete label vocabulary defined in YAML | Labels must be fixed before running; images optional for the GUI |
-| 11 | No accelerometer for now | Deferred; a second ring later is cheap thanks to the existing timestamp-matching pattern |
-| 12 | Slot: `timestamp_ns int64, emg float32[4]` | 24 bytes/slot; `item_size` derived from dtype |
-| 13 | Reuse existing `CircularBuffer` unchanged | It already provides `gap` and `overrun`; no ring changes needed |
+| 10 | **Label vocabulary lives in the calibration `.npz`, per model** | Two models may legitimately use different gesture sets; the model reads its vocabulary from its own dataset, so nothing global must stay in sync |
+| 11 | **`EmgAccelRing` duplicates the accelerometer** | A model reads its whole window (2 EMG + 3 accel) from ONE ring — no cross-ring timestamp join, no copying gyro/mag bytes it would discard |
+| 12 | **Slot: `timestamp_ns int64, emg float32[2], accel float32[3]`** | **28 bytes/slot**; `item_size` derived from `dtype.itemsize`. Matches `utils/emg_accel_ring.py` |
+| 12b | **One ring per Shimmer (`NUMBER_SHIMMER`)** | Horizontal scaling without changing the slot layout; `N = 1` for current tests |
+| 13 | Reuse `CircularBuffer` unchanged | It already provides `gap` and `overrun`; no ring changes needed |
 | 14 | PySide6 for P0 GUI | User wants a graphical interface, not a terminal |
 | 15 | Ps stays a separate process/window | Avoids coupling the 3D engine to the orchestrator |
+| 16 | **Shared code lives in `utils/`** | The tested ring layer already lives there; the role is what matters, not the folder name |
+| 17 | **No central config file — constants hardcoded** | Keeps `python -m p0` runnable with zero setup; `NUMBER_SHIMMER`, tick interval, ring capacity sit at the top of their owning module |
 
 ---
 
@@ -374,12 +420,11 @@ interface with buttons and windows, not a terminal UI.
 
 | Item | Status | Notes |
 |:--|:--|:--|
-| **YAML schema** | deferred | To be defined step by step |
-| **Label vocabulary** | open | Concrete list (e.g. `rest`, `forward`, `back`, `left`, `right`, `up`, `down`) + image paths |
-| **Calibration `.npz` keys** | open | Align with existing `simu_basic` datasets when the recorder is written |
+| **Multi-Shimmer windows (`N > 1`)** | open | A model's window must span all rings: per-Shimmer read + timestamp join, or an extra combined ring written by P1. `N = 1` today, so deferred |
+| **Calibration `.npz` keys** | open | Must include the per-model `labels` list and guarantee `rest`. Align with `hand_gesture_recognition_v1.py` (`X`, `y`, `blocks`, `sampling_rate`, `labels_map`) |
 | **Feature extraction** | open | Shared across models (recommended) vs. per-model |
 | **Model hot-reload trigger** | open | Button only, or also a file watcher? (Same mechanism, different trigger) |
-| **Ps label → motion mapping** | open | Where it lives (YAML vs. Ps code) |
+| **Ps label → motion mapping** | open | Where it lives (Ps code vs. dataset metadata) |
 
 ---
 
@@ -387,13 +432,13 @@ interface with buttons and windows, not a terminal UI.
 
 | Resource | Path |
 |:--|:--|
-| Ring buffer documentation | `Repo/CircularBuffer.md` |
-| Ring implementation | `new_camera/ring/` — `circular_buffer.py`, `estimation_ring.py`, `frame_ring.py` |
-| Existing simulator prototype | `simu_basic/main.py` (Ursina) |
-| Existing datasets | `simu_basic/*.npz` (Shimmer EMG, 15 per class) |
+| Ring implementation | `utils/circular_buffer.py`, `utils/shimmer_ring.py`, `utils/emg_accel_ring.py`, `utils/imu_ring.py` |
+| Ring tests | `tests/test_shimmer_ring.py` |
+| Existing Shimmer → LSL prototypes | `shimmers/shimmer_emg_lsl.py`, `shimmers/shimmer_imu_emg_lsl.py` |
+| Existing offline pipeline (dataset keys to match) | `hand_gesture_recognition_v1.py` |
 
 ---
 
 <div align="center">
-<sub>Design agreed · no code written yet · see <a href="#9-open-items">Open items</a> for what's next</sub>
+<sub>Design agreed · see <a href="#9-open-items">Open items</a> for what's next</sub>
 </div>
