@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "test_configuration_file",
+  "movement_time_s": 5.0,
+  "rest_time_s": 3.0,
+  "default_repetitions": 5,
+  "noise_enabled": true,
+  "gestures": [
+    {
+      "name": "fist",
+      "image": "fist.jpg",
+      "repetitions": 5
+    },
+    {
+      "name": "snap",
+      "image": "snap.jpg",
+      "repetitions": 5
+    },
+    {
+      "name": "pinch",
+      "image": "pinch.jpg",
+      "repetitions": 5
+    }
+  ]
+}

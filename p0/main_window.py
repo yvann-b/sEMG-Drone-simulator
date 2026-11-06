@@ -49,6 +49,9 @@ from PySide6.QtWidgets import (
 
 from p0.state import ModelRow, SystemSnapshot
 from p0.widgets import ModelTableModel, ModelView, StatusBar
+from p0.calibration_config import CalibrationConfig, list_config_files
+from p0.calibration_window import CalibrationWindow
+
 
 #: Width split of the window: models on the left, everything else on the right. (%)
 MODELS_SIDE = 60
@@ -90,8 +93,12 @@ class MainWindow(QMainWindow):
     #: A toggle / action was requested. ``action`` is the command vocabulary
     #: the controller understands; ``active`` is the desired new state.
     command_requested = Signal(str, bool)
-    #: The user picked a different model to feed the simulator.
+        #: The user picked a different model to feed the simulator.
     model_selected = Signal(str)
+    #: The active calibration configuration file changed (a filesystem path).
+    #: The controller only *stores* it now; Pc (a later step) will be spawned
+    #: with this path so it can read the recipe itself.
+    configuration_selected = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -117,6 +124,13 @@ class MainWindow(QMainWindow):
         self.calibrate_button = QPushButton("Start calibration")
         self.calibration_active = False
         self.calibrate_settings_button = QPushButton("Configure calibration…")
+        # Calibration *configuration* selector: which recipe file Pc will read.
+        self.config_selector = QComboBox()
+        self.config_selector.setToolTip(
+            "The calibration configuration file (calibrations/*.json). "
+            "Configure… to edit or create one."
+        )
+        self._refresh_config_selector()
         self.acquisition_button = QPushButton("Start acquisition")
         self.acquisition_active = False
         self.acquisition_button.setToolTip(
@@ -212,6 +226,13 @@ class MainWindow(QMainWindow):
         """Top-right pane: run a recording, or open its settings window."""
         pane, layout = self._make_pane("Calibration")
 
+        # Which configuration file (recipe) is active. P0 only stores the path;
+        # Pc will read the file itself when it is spawned.
+        config_row = QHBoxLayout()
+        config_row.addWidget(QLabel("Calibration file:"))
+        config_row.addWidget(self.config_selector, stretch=1)
+        layout.addLayout(config_row)
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.calibrate_button)
         buttons.addWidget(self.calibrate_settings_button)
@@ -252,9 +273,10 @@ class MainWindow(QMainWindow):
         self.acquisition_button.clicked.connect(self._toggle_acquisition)
         self.simulator_button.clicked.connect(self._toggle_simulator)
         self.reload_button.clicked.connect(self._request_reload)
-        self.calibrate_settings_button.clicked.connect(self._request_calibration_settings)
+        self.calibrate_settings_button.clicked.connect(self._open_calibration_window)
         self.open_simulation_button.clicked.connect(self._request_open_simulation)
         self.model_selector.currentTextChanged.connect(self._on_model_selected)
+        self.config_selector.currentIndexChanged.connect(self._on_config_selected)
 
     def _toggle_calibration(self) -> None:
         self.calibration_active = not self.calibration_active
@@ -280,10 +302,85 @@ class MainWindow(QMainWindow):
     def _request_reload(self) -> None:
         self.command_requested.emit("reload", True)
 
-    def _request_calibration_settings(self) -> None:
-        # A settings dialog is a later step; the signal already exists so the
-        # controller can be wired to it without touching the window again.
-        self.command_requested.emit("calibration_settings", True)
+    def _open_calibration_window(self) -> None:
+        """Open the dedicated calibration configuration window.
+
+        The window edits a recipe file under ``calibrations/``. On accept we
+        refresh the selector (the file may be new), select it, and show its
+        summary. The controller only receives the chosen path.
+        """
+        current_path = self._current_config_path()
+        config = None
+        if current_path is not None:
+            try:
+                config = CalibrationConfig.load(current_path)
+            except (OSError, ValueError):
+                config = None
+
+        window = CalibrationWindow(self, config=config, path=current_path)
+        if window.exec() == CalibrationWindow.DialogCode.Accepted:
+            self._refresh_config_selector(preferred=window.path)
+
+    def _on_config_selected(self, index: int) -> None:
+        """Tell the controller (and the summary) which recipe is now active."""
+        path = self.config_selector.itemData(index)
+        self._update_calibration_summary()
+        if path:
+            self.configuration_selected.emit(str(path))
+
+    def _current_config_path(self):
+        """The filesystem path of the currently selected recipe, or ``None``."""
+        data = self.config_selector.currentData()
+        return data
+
+    def _refresh_config_selector(self, preferred=None) -> None:
+        """Repopulate the recipe combo from ``calibrations/*.json``.
+
+        Signals are blocked while rebuilding so repopulation does not look like
+        the user picking a file. ``preferred`` (a path) is selected if present.
+        """
+        blocked = self.config_selector.blockSignals(True)
+        try:
+            self.config_selector.clear()
+            for path in list_config_files():
+                self.config_selector.addItem(path.stem, path)
+            target = preferred
+            if target is None:
+                target = self._current_config_path() if self.config_selector.count() else None
+            if target is not None:
+                index = self._index_of_path(target)
+                if index >= 0:
+                    self.config_selector.setCurrentIndex(index)
+        finally:
+            self.config_selector.blockSignals(blocked)
+        self._update_calibration_summary()
+
+    def _index_of_path(self, path) -> int:
+        for i in range(self.config_selector.count()):
+            if self.config_selector.itemData(i) == path:
+                return i
+        return -1
+
+    def _update_calibration_summary(self) -> None:
+        """Show a one-glance summary of the active recipe in the pane."""
+        if not hasattr(self, "calibration_summary"):
+            return  # called during __init__ before the pane is built
+        path = self._current_config_path()
+        if path is None:
+            self.calibration_summary.setText(CALIBRATION_SUMMARY_PLACEHOLDER)
+            return
+        try:
+            config = CalibrationConfig.load(path)
+        except (OSError, ValueError) as exc:
+            self.calibration_summary.setText(f"Could not read {path}:\n{exc}")
+            return
+        labels = config.labels()
+        self.calibration_summary.setText(
+            f"{config.name or '(unnamed)'}  |  "
+            f"{len(config.effective_gestures())} gestures  |  "
+            f"movement {config.movement_time_s:g}s  |  rest {config.rest_time_s:g}s\n"
+            f"Labels: {', '.join(labels)}"
+        )
 
     def _request_open_simulation(self) -> None:
         self.command_requested.emit("open_view", True)

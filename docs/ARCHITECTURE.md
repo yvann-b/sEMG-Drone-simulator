@@ -307,14 +307,37 @@ One `mp.Queue`, created by P0.
 > rate); Ps only compares against `now`. This is what makes model death, model
 > switching, and low-confidence output all behave correctly without special cases.
 
-### 4.4 Pc → disk — calibration dataset
+### 4.4 Calibration *configuration* file (the recipe)
+
+Before Pc records anything, the run is described by a **configuration file**
+(an editable "recipe") stored as JSON under `calibrations/<name>.json`. It is
+the opposite of the immutable dataset in 4.5: cheap to edit, reused across
+runs, and version-controlled. The **Configure calibration** window edits it;
+Pc reads it to know what to record.
+
+Field | Meaning
+--- | ---
+`name` | Human label for the recipe (also the default file stem).
+`movement_time_s` | Seconds each gesture is held before the recording moves on.
+`rest_time_s` | Seconds of `rest` inserted between two gesture slots.
+`default_repetitions` | **Global** number of times each gesture is performed. The window shows one field and bulk-applies it to every gesture row; each row may still carry its own count.
+`noise_enabled` | If true, the built-in `noise` gesture is added to the label set (enables a `rest → noise → rest` slot).
+`gestures[]` | Ordered user gestures: `{name, image, repetitions}`. `image` is a bare filename resolved against `images/`; it is a preview only, not part of the dataset.
+
+Constraints: `movement_time_s`, `rest_time_s` and `default_repetitions` must be positive; gesture names must be non-empty and unique; a missing image is a warning, not an error. The label vocabulary of the eventual dataset is derived from this recipe (every gesture, then `rest` last, with `noise` only when enabled) and frozen into the `.npz` by Pc — see 4.5.
+
+> This is *not* a global config that all models share. Each recipe produces a
+> per-model dataset, and the model reads its vocabulary from that dataset.
+
+### 4.5 Pc → disk — calibration dataset
 
 `data/calib_<model>_<timestamp>.npz`.
 
 **The dataset owns the label vocabulary.** Each capture records the gesture list
 for *that* model — `calib_svm.npz` may hold 5 gestures, `calib_cnn.npz` 6.
-There is no global vocabulary and no config file: two models are allowed to
-disagree, which is what makes experimenting cheap.
+There is no global vocabulary: the label set is derived from the recipe
+(4.4) and frozen into this dataset, so two models are allowed to disagree,
+which is what makes experimenting cheap.
 
 Constraints on the file:
 

@@ -71,6 +71,7 @@ def build(
 
     window.command_requested.connect(controller.submit_command)
     window.model_selected.connect(controller.select_model)
+    window.configuration_selected.connect(controller.select_configuration)
     controller.snapshot_ready.connect(window.apply_snapshot)
     controller.error.connect(lambda message: window.status_bar.showMessage(message, 5000))
 

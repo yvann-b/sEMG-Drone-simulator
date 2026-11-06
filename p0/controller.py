@@ -183,6 +183,19 @@ class Controller(QObject):
         if callable(select):
             select(name)
 
+    def select_configuration(self, path: str | None) -> None:
+        """Remember which calibration configuration file is active.
+
+        P0 only stores the path. Spawning Pc with it is a later step; the
+        controller never parses the file (the window does for its summary),
+        keeping the tick free of file I/O.
+        """
+        self._calibration_config_path = path
+
+    @property
+    def calibration_config_path(self) -> str | None:
+        return getattr(self, '_calibration_config_path', None)
+
     # ----------------------------------------------------------------- tick
     def _on_tick(self) -> None:
         try:

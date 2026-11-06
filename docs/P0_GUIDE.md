@@ -183,6 +183,49 @@ leak after the suite.*
 
 ---
 
+## Calibration configuration (the recipe)
+
+**Goal:** describe a recording *before* running it — which gestures, how
+many times each, how long each movement and each rest lasts — and save that
+as a reusable JSON file. This is the *input* to Pc; it is not the recorded
+dataset.
+
+**Files:** `p0/calibration_config.py` (the `CalibrationConfig` dataclass +
+JSON I/O), `p0/calibration_window.py` (the *Configure calibration*
+dialog), `p0/widgets/gesture_table.py` / `gesture_view.py` (the editable
+gesture table). Recipes live under `calibrations/*.json`; preview images
+under `images/`.
+
+The *Configure calibration…* button opens a modal window with these
+fields:
+
+Field | What it sets
+--- | ---
+**Name** | The recipe's label; also the default file name on *Save*.
+**Movement time** | Seconds each gesture is performed before moving on.
+**Rest time** | Seconds of `rest` between two gesture slots.
+**Repetitions** | The **global** number of times each gesture is performed. Changing it bulk-applies to every gesture row; a single row can still be edited afterwards.
+**Noise gesture** | Adds the built-in `noise` label (arm moves, no real gesture), enabling a `rest → noise → rest` slot.
+**Gesture table** | One row per gesture: name, image filename, live thumbnail, repetitions. *Add gesture* / *Delete row* edit the list.
+
+The pane also shows, live, the label vocabulary the recording will produce
+(every gesture, then `noise` when enabled, then `rest` last) and flags
+problems in red before you can *Save* / *OK*.
+
+**How the global repetition count works.** `default_repetitions` is stored
+in the JSON and seeds the *Repetitions* field on load. It is a convenience:
+the effective count still travels per gesture (`GestureSpec.repetitions`),
+so an advanced user can give one gesture a different count. The window never
+parses or records signals — it only produces a `CalibrationConfig`.
+
+**Done when:** you can add gestures, set a global repetition count (and still
+tune one row), toggle noise, save to `calibrations/`, reload it unchanged,
+and the summary matches the fields.
+? *Verified: 26 hardware-free tests in `tests/test_p0_calibration.py`
+(round-trip, derivation, validation, bulk repetition).*
+
+---
+
 ## Later steps
 
 - `Pc` calibration and `Pm_i` model processes (`drain_model_queues` /

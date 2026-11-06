@@ -54,8 +54,12 @@ PythonProject/
 │   ├── main_window.py          # the window (widgets, layout)
 │   ├── controller.py           # control loop: QTimer tick, routing
 │   ├── state.py                # snapshot dataclasses shared with the GUI
-│   └── widgets/                # custom widgets (model table, status bar)
+│   ├── calibration_config.py   # calibration recipe dataclass + JSON I/O (Task 1)
+│   ├── calibration_window.py   # 'Configure calibration' dialog (Task 1)
+│   └── widgets/                # custom widgets (tables, status bar, gesture editor)
 │       └── __init__.py
+│       └── gesture_table.py        # GestureTableModel: editable gesture rows
+│       └── gesture_view.py         # GestureView: paints the gesture table
 │
 ├── acquisition/                # [P1] Bluetooth sEMG driver → ring(s)
 │   ├── __init__.py
@@ -89,6 +93,8 @@ PythonProject/
 │       └── messages.py
 │
 ├── data/                       # calibration datasets (git-ignored)
+├── calibrations/           # calibration *configuration* JSON files (recipes)
+├── images/                 # gesture preview images (referenced by filename)
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── PROJECT_LAYOUT.md       # ← this file
@@ -97,11 +103,13 @@ PythonProject/
     └── test_shimmer_ring.py    # [EXISTS]
 ```
 
-> **No `config/` folder.** There is no central config file: each model's label
-> vocabulary travels inside its calibration `.npz`, so two models may
-> legitimately use different gesture sets. The few remaining constants
-> (`NUMBER_SHIMMER`, tick interval, ring capacity) are hardcoded at the top of
-> the module that owns them, keeping `python -m p0` runnable with zero setup.
+> **No global `config/` file.** Each model's label vocabulary travels inside
+> its calibration `.npz`, so two models may legitimately use different gesture
+> sets. The `calibrations/*.json` files are *per-recording recipes* (edited in
+> the Configure calibration window, consumed by Pc) — not a shared runtime
+> config. The few remaining constants (`NUMBER_SHIMMER`, tick interval, ring
+> capacity) are hardcoded at the top of the module that owns them, keeping
+> `python -m p0` runnable with zero setup.
 
 ---
 
