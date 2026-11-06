@@ -10,7 +10,7 @@ The window is split into three rectangles:
     │                            │  Simulation                   │
     │                            │  (run · reload · open view)   │
     └────────────────────────────┴───────────────────────────────┘
-      Ring: —   P1 rate: —   Ps: —
+      Sensor 1: online   Ps: —
 The left column is ~60% of the width and uses the full height. The right column
 takes the remainder and is split between calibration (top) and simulation
 (bottom). The ratios are a *convenience*, not a constraint: both divisions are
@@ -22,7 +22,7 @@ visible comes from a snapshot pushed by the controller:
     controller ──snapshot_ready──▶ MainWindow.apply_snapshot()
                                           │
                                           ├─▶ ModelTableModel.apply_snapshot
-                                          └─▶ StatusBar.set_ring / set_rate / set_ps
+                                          └─▶ StatusBar.set_sensors / set_ps
 
 Going the other way, the window only *posts commands*: a button click emits a
 signal, the controller picks it up on the next tick. The window never waits for
@@ -298,8 +298,7 @@ class MainWindow(QMainWindow):
         """Render one tick of truth. The *only* way the table changes."""
         self.models.apply_snapshot(snapshot.models, now=snapshot.now)
         self._sync_selector(self.models.row_names())
-        self.status_bar.set_ring(snapshot.ring_fill)
-        self.status_bar.set_rate(snapshot.p1_rate_hz)
+        self.status_bar.set_sensors(snapshot.p1_states)
         self.status_bar.set_ps(snapshot.ps_state)
 
     def _sync_selector(self, names: list[str]) -> None:

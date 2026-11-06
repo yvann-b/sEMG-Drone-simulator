@@ -143,10 +143,34 @@ class Controller(QObject):
         self._started = False
         self._timer.stop()
 
+    def close_backend(self) -> None:
+        """Release the backend's resources (stop P1, unlink the rings).
+
+        Called on application shutdown *after* :meth:`stop`, so no tick races
+        the teardown. A backend without ``close`` (e.g. ``FakeBackend``) is a
+        no-op.
+        """
+        close = getattr(self._backend, "close", None)
+        if callable(close):
+            close()
+
     # ------------------------------------------------------------------ GUI
     def submit(self, command: Command) -> None:
         """Queue a GUI command. Handled on the next tick, never right now."""
         self._commands.put(command)
+
+    def submit_command(self, action: str, active: bool) -> None:
+        """Slot for ``MainWindow.command_requested(str, bool)``.
+
+        The window speaks ``(action, active_bool)``; the acquisition handler
+        speaks ``Command(action, model="start"|"stop")``. This adapter bridges
+        the two so the window never needs the command vocabulary details.
+        Other actions ignore ``active`` for now.
+        """
+        if action == "acquire":
+            self.submit(Command(action="acquire", model="start" if active else "stop"))
+        else:
+            self.submit(Command(action=action))
 
     def select_model(self, name: str | None) -> None:
         """Choose which model's output is forwarded to Ps.
@@ -181,11 +205,30 @@ class Controller(QObject):
             # _selected directly would leave the two out of step.
             self.select_model(command.model)
             return
+        if command.action == "acquire":
+            self._handle_acquisition(command)
+            return
         # The rest are lifecycle actions; they are wired up in the process
         # steps. For now they must not crash the tick.
-        if command.action in ("acquire", "calibrate", "simulate", "reload"):
+        if command.action in ("calibrate", "simulate", "reload"):
             return
         self.error.emit(f"Unknown command: {command.action!r}")
+
+    def _handle_acquisition(self, command: Command) -> None:
+        """Start / stop P1 through the backend.
+
+        A ``Command`` carries a ``model`` string, not a bool, so the desired
+        state is encoded as ``"start"`` / ``"stop"``. A backend without the
+        acquisition surface (e.g. ``FakeBackend`` in the GUI tests) is a no-op.
+        """
+        start = getattr(self._backend, "start_acquisition", None)
+        stop = getattr(self._backend, "stop_acquisition", None)
+        if start is None or stop is None:
+            return
+        if command.model == "stop":
+            stop()
+        else:
+            start()
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -196,11 +239,37 @@ class Controller(QObject):
         if selected_row is not None and selected_row.last_label:
             self._backend.forward(selected_row.last_label, now + COMMAND_TIMEOUT_S)
 
+        # Sensor health + child errors. A reported error both flips the
+        # indicator to "error" and is emitted on the ``error`` signal, so a
+        # Bluetooth failure reaches the GUI, not just the console.
+        p1_states = self._poll_sensor_health()
+
         snapshot = SystemSnapshot(
             models=tuple(rows),
-            ring_fill=None,
             p1_rate_hz=None,
+            p1_states=p1_states,
             ps_state=self._backend.selected,
             now=now,
         )
         self.snapshot_ready.emit(snapshot)
+
+    def _poll_sensor_health(self) -> tuple[str, ...]:
+        """Per-Shimmer states for this tick, and forward any new child errors.
+
+        Returns a tuple (one entry per sensor) for ``SystemSnapshot.p1_states``.
+        ``FakeBackend`` has neither ``p1_states`` nor ``drain_events``, so this
+        returns ``()`` there and the status bar shows no sensor chip.
+
+        Order matters: drain *first* to capture the new error strings (the pipe
+        is one-shot), emit them, then read ``p1_states`` (whose own drain finds
+        nothing left but still consults the per-port error map).
+        """
+        drain = getattr(self._backend, "drain_events", None)
+        new_errors = drain() if callable(drain) else []
+        for message in new_errors:
+            self.error.emit(f"Sensor error -- {message}")
+
+        states_fn = getattr(self._backend, "p1_states", None)
+        if callable(states_fn):
+            return tuple(states_fn())
+        return ()

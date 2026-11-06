@@ -65,16 +65,20 @@ class SystemSnapshot:
     """
 
     models: tuple[ModelRow, ...] = ()
-    ring_fill: float | None = None      # percent 0..100, or None
     p1_rate_hz: float | None = None
+    #: Per-Shimmer health, one entry per sensor in spawn order:
+    #: "offline" | "connecting" | "online" | "error". The status bar shows one
+    #: "Sensor <i>:" chip per entry, so the count and the states both come from
+    #: the snapshot -- the window never needs to know NUMBER_SHIMMER.
+    p1_states: tuple[str, ...] = ()
     ps_state: str | None = None
     now: float | None = None            # monotonic clock used for Age
 
     def as_dict(self) -> dict:
         return {
             "models": self.models,
-            "ring_fill": self.ring_fill,
             "p1_rate_hz": self.p1_rate_hz,
+            "p1_states": self.p1_states,
             "ps_state": self.ps_state,
             "now": self.now,
         }
@@ -94,5 +98,10 @@ def format_age(last_seen: float | None, now: float | None) -> str:
 
 def empty_snapshot() -> SystemSnapshot:
     """The snapshot a controller returns before anything has happened."""
-    return SystemSnapshot(models=tuple(), ring_fill=None, p1_rate_hz=None, ps_state=None)
+    return SystemSnapshot(
+        models=tuple(),
+        p1_rate_hz=None,
+        p1_states=(),
+        ps_state=None,
+    )
 

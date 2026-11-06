@@ -380,7 +380,7 @@ interface with buttons and windows, not a terminal UI.
 | **Model table** | One row per `Pm_i` — name, status (running / training / error / stopped), last label, last confidence, age of last message |
 | **Selector** | Dropdown choosing which model feeds Ps |
 | **Buttons** | Reload · Start/Stop calibration · Configure calibration… · Start/Stop acquisition · Start/Stop simulator · Open simulation view |
-| **Status bar** | Ring fill level · P1 sample rate · Ps connection state |
+| **Status bar** | One **`Sensor <i>:`** chip per Shimmer (offline / connecting / online / error, colour-coded) · Ps connection state. Ring fill and P1 rate were **dropped** — internal buffer plumbing, not operator-facing (see [`P1_WIRING.md`](P1_WIRING.md) §4) |
 
 > **Concurrency.** The control loop runs on a `QTimer` tick; the GUI reads a
 > snapshot of state and posts commands back. The loop never blocks the UI and the
@@ -413,6 +413,9 @@ interface with buttons and windows, not a terminal UI.
 | 15 | Ps stays a separate process/window | Avoids coupling the 3D engine to the orchestrator |
 | 16 | **Shared code lives in `utils/`** | The tested ring layer already lives there; the role is what matters, not the folder name |
 | 17 | **No central config file — constants hardcoded** | Keeps `python -m p0` runnable with zero setup; `NUMBER_SHIMMER`, tick interval, ring capacity sit at the top of their owning module |
+| 18 | **Per-Shimmer sensor health in the status bar** | One `Sensor <i>:` chip per Shimmer, built from `SystemSnapshot.p1_states`; a single dead Shimmer is visible next to a healthy one. Count comes from the snapshot, so the window never needs `NUMBER_SHIMMER` (see [`P1_WIRING.md`](P1_WIRING.md) §4) |
+| 19 | **Child errors cross the process boundary over a `Pipe`, not a `Queue`** | `Queue.put` flushes on a background thread that can lose the message when the child re-raises and exits; `Pipe.send` is synchronous, so the failure reliably reaches the GUI (see [`P1_WIRING.md`](P1_WIRING.md) §4) |
+| 20 | **P0 owns the rings and `join()`s P1 before unlinking** | A child still mapping the segment must be gone before `unlink()`, else the segment leaks; a stale-unlink on startup clears segments left by a crashed previous P0 (see [`P1_WIRING.md`](P1_WIRING.md) §2, §5) |
 
 ---
 
