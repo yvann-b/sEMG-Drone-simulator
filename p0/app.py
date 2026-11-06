@@ -63,7 +63,7 @@ def build(
     (that is what ``tests/test_p0_gui.py`` relies on). The real launch path
     (``main()``) passes a :class:`~p0.backend.DeviceBackend`, which owns the
     shared-memory rings and spawns P1.
-    """
+        """
     window = window or MainWindow()
     if backend is None:
         backend = FakeBackend(window.models.row_names())
@@ -74,6 +74,18 @@ def build(
     window.configuration_selected.connect(controller.select_configuration)
     controller.snapshot_ready.connect(window.apply_snapshot)
     controller.error.connect(lambda message: window.status_bar.showMessage(message, 5000))
+
+    # Raw-ring debug plot: the window reads the shared-memory rings directly.
+    # Only a backend that actually owns rings (DeviceBackend) can supply them;
+    # a FakeBackend has none, so the provider yields empty lists and the plot
+    # window simply shows nothing rather than crashing.
+    def _ring_provider():
+        return (
+            getattr(backend, "emg_rings", []) or [],
+            getattr(backend, "imu_rings", []) or [],
+        )
+
+    window.set_ring_provider(_ring_provider)
 
     # The selector's initial value, so the loop starts on the same model the
     # user sees selected.

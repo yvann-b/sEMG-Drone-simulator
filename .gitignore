@@ -9,3 +9,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# Generated calibration datasets (see docs/PROJECT_LAYOUT.md)
+data/
+
+# Leftover smoke-test recipe produced while testing calibration
+calibrations/_smoke.json
+

@@ -42,6 +42,7 @@ from multiprocessing import shared_memory
 
 from utils.emg_accel_ring import EmgAccelRing
 from utils.imu_ring import ImuRing
+from p0.state import CalibrationRun
 
 #: Sampling rate requested from every Shimmer. Hardcoded like the other P0
 #: constants (tick interval, ring capacity): keeps ``python -m p0`` runnable.
@@ -52,7 +53,7 @@ SAMPLING_RATE_HZ = 512.0
 RING_CAPACITY = 8192
 
 #: Default Bluetooth outgoing COM port for the first Shimmer.
-DEFAULT_PORT = "COM3"
+DEFAULT_PORT = "COM5"
 
 
 def _unlink_if_stale(name: str) -> None:
@@ -145,6 +146,72 @@ def _run_p1(
         imu_ring.close()
 
 
+def _send(conn, payload: dict) -> None:
+    """Best-effort synchronous send on a one-way pipe."""
+    try:
+        conn.send(payload)
+    except Exception:  # noqa: BLE001 -- reporting must never re-raise
+        pass
+
+
+def _run_calibration(
+    ring: EmgAccelRing,
+    config_path: str,
+    session_name: str,
+    stop_event,
+    event_conn,
+    rate: float,
+    seed: int | None,
+) -> None:
+    """Child-process entry point for Pc (the calibration recorder).
+
+    Runs in its own interpreter. It loads the recipe, records against the ring
+    and streams phase/progress/done/error events back to P0 over a one-way
+    pipe. Importing ``calibration`` here keeps P0's import graph free of the
+    recorder until a run is actually started.
+    """
+    from calibration.recorder import Pc
+    from p0.calibration_config import CalibrationConfig
+
+    try:
+        config = CalibrationConfig.load(config_path)
+    except Exception as exc:  # noqa: BLE001 -- report, never crash silently
+        _send(event_conn, {"kind": "error", "detail": f"Cannot load config: {exc}"})
+        ring.close()
+        return
+
+    pc = Pc(
+        ring,
+        config,
+        config_path=config_path,
+        session_name=session_name,
+        event_conn=event_conn,
+        stop_event=stop_event,
+        seed=seed,
+        sampling_rate_hz=rate,
+    )
+    try:
+        pc.run()
+    except Exception as exc:  # noqa: BLE001 -- child must not hang the parent
+        _send(event_conn, {"kind": "error", "detail": f"{type(exc).__name__}: {exc}"})
+    finally:
+        # The child only detaches; the parent owns unlink().
+        ring.close()
+
+
+@dataclass
+class _CalibrationProcess:
+    """Bookkeeping for the spawned Pc child (kept in the parent only)."""
+
+    process: mp.Process
+    stop_event: object
+    event_conn: object
+    session_name: str
+    config_path: str
+    #: Latest merged run state (updated as events arrive).
+    run: CalibrationRun
+
+
 class DeviceBackend:
     """Ring owner + P1 spawner. The real backend for :class:`Controller`."""
 
@@ -205,6 +272,11 @@ class DeviceBackend:
         #: Latest failure per port, so a dead Shimmer stays "error" even after
         #: the one-shot pipe message has been drained.
         self._errors_by_port: dict[str, str] = {}
+
+        #: The running calibration child, or ``None`` when idle.
+        self._calibration: _CalibrationProcess | None = None
+        #: Latest calibration run state, kept between ticks for the snapshot.
+        self.calibration_run: CalibrationRun = CalibrationRun()
 
     # ---------------------------------------------------- acquisition (P1)
     # === IMPLEMENTED ===
@@ -361,6 +433,145 @@ class DeviceBackend:
                 return wanted
         return "offline"
 
+    # ------------------------------------------------- calibration (Pc)
+    # === IMPLEMENTED ===
+    @property
+    def calibrating(self) -> bool:
+        """``True`` while a Pc child is alive."""
+        return self._calibration is not None and self._calibration.process.is_alive()
+
+    def start_calibration(
+        self,
+        config_path,
+        session_name: str | None = None,
+        *,
+        seed: int | None = None,
+    ) -> bool:
+        """Spawn Pc to record against ``emg_ring_0``. Returns success.
+
+        No-op (returns ``False``) if a run is already in progress or if no ring
+        exists. The current run state becomes ``active`` immediately so the GUI
+        can open its window before the first event arrives.
+        """
+        if self.calibrating:
+            return False
+        if self._calibration is not None:
+            self._reap_calibration()
+
+        config_path = str(config_path)
+        session = (session_name or "").strip()
+        stop_event = self.ctx.Event()
+        parent_conn, child_conn = self.ctx.Pipe(duplex=False)
+        process = self.ctx.Process(
+            target=_run_calibration,
+            args=(
+                self.emg_rings[0],
+                config_path,
+                session,
+                stop_event,
+                child_conn,
+                self.rate,
+                seed,
+            ),
+            name="Pc:calibration",
+            daemon=True,
+        )
+        process.start()
+        child_conn.close()
+
+        self._calibration = _CalibrationProcess(
+            process=process,
+            stop_event=stop_event,
+            event_conn=parent_conn,
+            session_name=session,
+            config_path=config_path,
+            run=CalibrationRun(active=True, phase="intro", session_name=session),
+        )
+        self.calibration_run = self._calibration.run
+        return True
+
+    def stop_calibration(self) -> None:
+        """Ask Pc to stop (cancel) and reap it."""
+        if self._calibration is None:
+            return
+        self._calibration.stop_event.set()
+        self._reap_calibration()
+
+    def _reap_calibration(self) -> None:
+        """Join the Pc child, drain its last events, then drop the handle."""
+        if self._calibration is None:
+            return
+        self.drain_calibration()
+        self._calibration.process.join(timeout=5.0)
+        self._calibration = None
+
+    def drain_calibration(self) -> CalibrationRun:
+        """Drain Pc events (non-blocking) and return the merged run state.
+
+        Called every tick by the controller. Never blocks and never raises; a
+        finished child is reaped lazily on the next call. ``done``/``error``
+        latch into :attr:`calibration_run` so the GUI keeps the final state
+        until it acknowledges (a new run resets it).
+        """
+        proc = self._calibration
+        if proc is None:
+            return self.calibration_run
+
+        run = proc.run
+        conn = proc.event_conn
+        while conn is not None:
+            try:
+                if not conn.poll():
+                    break
+                event = conn.recv()
+            except (EOFError, OSError):
+                conn = None
+                break
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("kind")
+            if kind == "phase":
+                run = CalibrationRun(
+                    active=True,
+                    phase=event.get("phase", run.phase),
+                    label=event.get("label"),
+                    image=event.get("image"),
+                    repetition=event.get("repetition"),
+                    total_repetitions=event.get("total_repetitions"),
+                    progress=float(event.get("progress", run.progress)),
+                    session_name=proc.session_name,
+                )
+            elif kind == "done":
+                run = CalibrationRun(
+                    active=False,
+                    phase="done",
+                    progress=1.0,
+                    session_name=proc.session_name,
+                    done=True,
+                    output_path=event.get("path"),
+                )
+            elif kind == "error":
+                run = CalibrationRun(
+                    active=False,
+                    phase=run.phase,
+                    progress=run.progress,
+                    session_name=proc.session_name,
+                    error=str(event.get("detail", "unknown error")),
+                )
+
+        proc.run = run
+        self.calibration_run = run
+
+        # Reap the child as soon as it has finished and reported.
+        if (run.done or run.error is not None) and not proc.process.is_alive():
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            proc.process.join(timeout=0.5)
+            self._calibration = None
+        return run
+
     # ------------------------------------------------ control plane (stubs)
     # === NOT IMPLEMENTED (models / simulator are later steps) ===
     # These mirror the slice of FakeBackend that Controller already uses, so
@@ -395,6 +606,7 @@ class DeviceBackend:
         Order matters: children must have detached (``close``) before the
         parent unlinks, otherwise other processes' mappings are invalidated.
         """
+        self.stop_calibration()
         self.stop_acquisition()
         for ring in (*self.emg_rings, *self.imu_rings):
             try:

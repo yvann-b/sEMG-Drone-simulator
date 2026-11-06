@@ -16,9 +16,17 @@ Two rules make this safe:
   renders whatever snapshot arrives. The tick and the UI never wait on each
   other.
 
-This step ships a ``FakeBackend``: a controller that runs with **no processes
-at all**, so the loop can be exercised (and tested) before P1/Pc/Pm/Ps exist.
-``Controller.backend`` is the only seam the real spawner will replace.
+The backend is the only seam. Two implementations exist:
+
+* :class:`FakeBackend` (below) -- no rings, no processes; used by the GUI tests
+  and as the default so the window stays runnable with zero setup.
+* :class:`p0.backend.DeviceBackend` -- owns the shared-memory rings and spawns
+  P1; used by the real launch path (``p0.app.main``).
+
+The controller only relies on ``drain_model_queues`` / ``forward`` /
+``select`` / ``selected`` and, when present, ``ring_fill_percent``,
+``start_acquisition`` / ``stop_acquisition`` and ``close`` -- all reached
+through ``getattr`` so a bare :class:`FakeBackend` still works.
 """
 
 from __future__ import annotations
@@ -51,6 +59,8 @@ class Command:
 
     action: str
     model: str | None = None
+    #: Optional human session name for a calibration run.
+    session: str | None = None
 
 
 class _ModelState:
@@ -162,39 +172,46 @@ class Controller(QObject):
     def submit_command(self, action: str, active: bool) -> None:
         """Slot for ``MainWindow.command_requested(str, bool)``.
 
-        The window speaks ``(action, active_bool)``; the acquisition handler
-        speaks ``Command(action, model="start"|"stop")``. This adapter bridges
-        the two so the window never needs the command vocabulary details.
-        Other actions ignore ``active`` for now.
-        """
+        The window speaks ``(action, active_bool)``; the controller's
+        acquisition handler speaks ``Command(action, model="start"|"stop")``.
+        This adapter bridges the two so the window never needs to know the
+        command vocabulary details. Other actions ignore ``active`` for now.
+
+
+                """
         if action == "acquire":
             self.submit(Command(action="acquire", model="start" if active else "stop"))
+        elif action == "calibrate":
+            self.submit(Command(action="calibrate", model="start" if active else "stop"))
         else:
             self.submit(Command(action=action))
 
     def select_model(self, name: str | None) -> None:
-        """Choose which model's output is forwarded to Ps.
-
-        The selection is pushed to the backend too, so the loop and the backend
-        never disagree about which model is being watched.
-        """
         self._selected = name
         select = getattr(self._backend, "select", None)
         if callable(select):
             select(name)
 
+    def start_calibration(self, session_name: str | None = None) -> None:
+        """Ask the backend to start a run (from the run window's Start button)."""
+        self.submit(Command(action="calibrate", model="start", session=session_name))
+
+    def stop_calibration(self) -> None:
+        """Ask the backend to cancel the current run."""
+        self.submit(Command(action="calibrate", model="stop"))
+
     def select_configuration(self, path: str | None) -> None:
         """Remember which calibration configuration file is active.
 
         P0 only stores the path. Spawning Pc with it is a later step; the
-        controller never parses the file (the window does for its summary),
-        keeping the tick free of file I/O.
+        controller deliberately never parses the file (the window does that for
+        its summary), keeping the tick free of file I/O.
         """
         self._calibration_config_path = path
 
     @property
     def calibration_config_path(self) -> str | None:
-        return getattr(self, '_calibration_config_path', None)
+        return getattr(self, "_calibration_config_path", None)
 
     # ----------------------------------------------------------------- tick
     def _on_tick(self) -> None:
@@ -221,11 +238,36 @@ class Controller(QObject):
         if command.action == "acquire":
             self._handle_acquisition(command)
             return
+        if command.action == "calibrate":
+            self._handle_calibration(command)
+            return
         # The rest are lifecycle actions; they are wired up in the process
         # steps. For now they must not crash the tick.
-        if command.action in ("calibrate", "simulate", "reload"):
+        if command.action in ("simulate", "reload"):
             return
         self.error.emit(f"Unknown command: {command.action!r}")
+
+    def _handle_calibration(self, command: Command) -> None:
+        """Start / stop the calibration recorder (Pc) through the backend.
+
+        ``command.model`` carries the action: ``"start"`` / ``"stop"``. On
+        start, the active configuration path (set by the window selector) is
+        required; an optional session name rides in ``command.session``.
+        A backend without the calibration surface (e.g. ``FakeBackend``) is a
+        no-op so the GUI tests keep working.
+        """
+        start = getattr(self._backend, "start_calibration", None)
+        stop = getattr(self._backend, "stop_calibration", None)
+        if start is None or stop is None:
+            return
+        if command.model == "stop":
+            stop()
+            return
+        config_path = self.calibration_config_path
+        if not config_path:
+            self.error.emit("Select a calibration configuration first.")
+            return
+        start(config_path, command.session)
 
     def _handle_acquisition(self, command: Command) -> None:
         """Start / stop P1 through the backend.
@@ -252,10 +294,17 @@ class Controller(QObject):
         if selected_row is not None and selected_row.last_label:
             self._backend.forward(selected_row.last_label, now + COMMAND_TIMEOUT_S)
 
-        # Sensor health + child errors. A reported error both flips the
-        # indicator to "error" and is emitted on the ``error`` signal, so a
-        # Bluetooth failure reaches the GUI, not just the console.
-        p1_states = self._poll_sensor_health()
+        # Per-Shimmer health + calibration run state, when the backend can
+        # provide them (the FakeBackend cannot -> defaults keep the tick inert).
+        p1_states: tuple[str, ...] = ()
+        p1_states_fn = getattr(self._backend, "p1_states", None)
+        if callable(p1_states_fn):
+            p1_states = tuple(p1_states_fn())
+
+        calibration = None
+        drain_calibration = getattr(self._backend, "drain_calibration", None)
+        if callable(drain_calibration):
+            calibration = drain_calibration()
 
         snapshot = SystemSnapshot(
             models=tuple(rows),
@@ -263,26 +312,12 @@ class Controller(QObject):
             p1_states=p1_states,
             ps_state=self._backend.selected,
             now=now,
+            calibration=calibration or self._default_calibration(),
         )
         self.snapshot_ready.emit(snapshot)
 
-    def _poll_sensor_health(self) -> tuple[str, ...]:
-        """Per-Shimmer states for this tick, and forward any new child errors.
+    @staticmethod
+    def _default_calibration():
+        from p0.state import CalibrationRun
 
-        Returns a tuple (one entry per sensor) for ``SystemSnapshot.p1_states``.
-        ``FakeBackend`` has neither ``p1_states`` nor ``drain_events``, so this
-        returns ``()`` there and the status bar shows no sensor chip.
-
-        Order matters: drain *first* to capture the new error strings (the pipe
-        is one-shot), emit them, then read ``p1_states`` (whose own drain finds
-        nothing left but still consults the per-port error map).
-        """
-        drain = getattr(self._backend, "drain_events", None)
-        new_errors = drain() if callable(drain) else []
-        for message in new_errors:
-            self.error.emit(f"Sensor error -- {message}")
-
-        states_fn = getattr(self._backend, "p1_states", None)
-        if callable(states_fn):
-            return tuple(states_fn())
-        return ()
+        return CalibrationRun()

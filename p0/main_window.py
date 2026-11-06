@@ -51,6 +51,8 @@ from p0.state import ModelRow, SystemSnapshot
 from p0.widgets import ModelTableModel, ModelView, StatusBar
 from p0.calibration_config import CalibrationConfig, list_config_files
 from p0.calibration_window import CalibrationWindow
+from p0.calibration_run_window import CalibrationRunWindow
+from p0.plot_raw_rings import RingPlotWindow
 
 
 #: Width split of the window: models on the left, everything else on the right. (%)
@@ -123,6 +125,8 @@ class MainWindow(QMainWindow):
         self.reload_button = QPushButton("Reload")
         self.calibrate_button = QPushButton("Start calibration")
         self.calibration_active = False
+        #: The guided recording window, or ``None`` when no run is showing.
+        self.calibration_run_window: CalibrationRunWindow | None = None
         self.calibrate_settings_button = QPushButton("Configure calibration…")
         # Calibration *configuration* selector: which recipe file Pc will read.
         self.config_selector = QComboBox()
@@ -140,6 +144,18 @@ class MainWindow(QMainWindow):
         self.simulator_button = QPushButton("Start simulator")
         self.simulator_active = False
         self.open_simulation_button = QPushButton("Open simulation view")
+
+        # Debug view of the raw ring contents. It does not post a command and
+        # does not go through the controller: the rings are shared memory, so
+        # the window reads them directly. It needs the live ring handles, which
+        # only the app (that owns the backend) can hand over -> open_ring_plot.
+        self.plot_rings_button = QPushButton("Plot raw rings")
+        self.plot_rings_button.setToolTip(
+            "Open a live view of the newest samples in the EMG / IMU rings. "
+            "Useful to confirm a Shimmer is really streaming."
+        )
+        self._ring_plot_window: RingPlotWindow | None = None
+        self._ring_provider = None  # set by the app: () -> (emg_rings, imu_rings)
 
         # --- window skeleton --------------------------------------------
         central = QWidget()
@@ -168,6 +184,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(QLabel("EMG sensor:"))
         layout.addWidget(self.acquisition_button)
+        layout.addWidget(self.plot_rings_button)
         layout.addStretch(1)
         return bar
 
@@ -275,6 +292,7 @@ class MainWindow(QMainWindow):
         self.reload_button.clicked.connect(self._request_reload)
         self.calibrate_settings_button.clicked.connect(self._open_calibration_window)
         self.open_simulation_button.clicked.connect(self._request_open_simulation)
+        self.plot_rings_button.clicked.connect(self._toggle_ring_plot)
         self.model_selector.currentTextChanged.connect(self._on_model_selected)
         self.config_selector.currentIndexChanged.connect(self._on_config_selected)
 
@@ -283,7 +301,57 @@ class MainWindow(QMainWindow):
         self.calibrate_button.setText(
             "Stop calibration" if self.calibration_active else "Start calibration"
         )
+        if self.calibration_active:
+            self._open_calibration_run_window()
+        else:
+            # Stop: closing the run window emits ``cancelled`` -> P0 stops Pc.
+            self._close_calibration_run_window()
         self.command_requested.emit("calibrate", self.calibration_active)
+
+    # --------------------------------------------------- calibration run GUI
+    def _open_calibration_run_window(self) -> None:
+        """Open (or reopen) the guided recording window for a new run."""
+        if self.calibration_run_window is not None:
+            self.calibration_run_window.close()
+        window = CalibrationRunWindow(self)
+        window.cancelled.connect(self._cancel_calibration_run)
+        window.closed.connect(self._on_calibration_run_closed)
+        self.calibration_run_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _close_calibration_run_window(self) -> None:
+        if self.calibration_run_window is not None:
+            window = self.calibration_run_window
+            self.calibration_run_window = None
+            window.blockSignals(True)  # we already know we are stopping
+            window.close()
+
+    def _cancel_calibration_run(self) -> None:
+        """The run window asked to cancel: stop the recording via the backend."""
+        if self.calibration_active:
+            self.calibration_active = False
+            self.calibrate_button.setText("Start calibration")
+            self.command_requested.emit("calibrate", False)
+
+    def _on_calibration_run_closed(self) -> None:
+        self.calibration_run_window = None
+        if self.calibration_active:
+            self.calibration_active = False
+            self.calibrate_button.setText("Start calibration")
+
+    def _feed_calibration_run(self, run) -> None:
+        """Push the latest run state to the window, refining the button label."""
+        window = self.calibration_run_window
+        if window is None:
+            return
+        window.apply_run(run)
+        # Once the recorder finishes on its own, reset the button so the next
+        # click starts a fresh run rather than trying to "stop" a dead one.
+        if run.is_finished() and self.calibration_active:
+            self.calibration_active = False
+            self.calibrate_button.setText("Start calibration")
 
     def _toggle_acquisition(self) -> None:
         self.acquisition_active = not self.acquisition_active
@@ -385,6 +453,41 @@ class MainWindow(QMainWindow):
     def _request_open_simulation(self) -> None:
         self.command_requested.emit("open_view", True)
 
+    # --------------------------------------------------- raw-ring debug view
+    def set_ring_provider(self, provider) -> None:
+        """Register a callable returning ``(emg_rings, imu_rings)``.
+
+        The window cannot create or own the rings (that is the backend's job),
+        so the app -- which holds the backend -- injects this provider. It keeps
+        the window free of any import of :mod:`p0.backend`.
+        """
+        self._ring_provider = provider
+
+    def _toggle_ring_plot(self) -> None:
+        """Open (or bring forward) the live raw-ring plot window."""
+        window = self._ring_plot_window
+        if window is not None and window.isVisible():
+            window.raise_()
+            window.activateWindow()
+            return
+
+        if self._ring_provider is None:
+            self.status_bar.showMessage(
+                "Raw-ring plot is only available with live acquisition.", 5000
+            )
+            return
+        emg_rings, imu_rings = self._ring_provider()
+        window = RingPlotWindow(emg_rings, imu_rings, self)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.destroyed.connect(self._on_ring_plot_closed)
+        self._ring_plot_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_ring_plot_closed(self, *_) -> None:
+        self._ring_plot_window = None
+
     def _on_model_selected(self, name: str) -> None:
         if name:
             self.model_selected.emit(name)
@@ -397,6 +500,7 @@ class MainWindow(QMainWindow):
         self._sync_selector(self.models.row_names())
         self.status_bar.set_sensors(snapshot.p1_states)
         self.status_bar.set_ps(snapshot.ps_state)
+        self._feed_calibration_run(snapshot.calibration)
 
     def _sync_selector(self, names: list[str]) -> None:
         """Keep the combo box in step with the rows, preserving the selection.

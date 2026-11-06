@@ -12,7 +12,7 @@ That keeps "who owns the truth" unambiguous: the controller does.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 #: The only statuses a model row may hold. Unknown text is drawn neutral;
@@ -56,6 +56,39 @@ class ModelRow:
         return f"{self.last_confidence:.2f}"
 
 
+#: The phases a calibration run can be in, as reported by Pc. ``idle`` means
+#: "no run"; the rest mirror :mod:`calibration.timeline`.
+CalibrationPhase = Literal["idle", "intro", "rest", "gesture", "done"]
+
+
+@dataclass(frozen=True)
+class CalibrationRun:
+    """The live state of one calibration recording (Pc), rendered by the GUI.
+
+    Built each tick by the controller from the events Pc streams over its pipe.
+    ``active`` is ``True`` while Pc is running; ``done``/``error`` mark the end.
+    ``progress`` is ``0.0..1.0`` planned-time completion (drives the bar).
+    ``label`` is the *next move* for a gesture slot (a gesture name), or
+    ``"rest"``; ``image`` is the gesture's bare preview filename.
+    """
+
+    active: bool = False
+    phase: CalibrationPhase = "idle"
+    label: str | None = None
+    image: str | None = None
+    repetition: int | None = None
+    total_repetitions: int | None = None
+    progress: float = 0.0
+    session_name: str = ""
+    done: bool = False
+    error: str | None = None
+    output_path: str | None = None
+
+    def is_finished(self) -> bool:
+        """``True`` once the run ended (success or error)."""
+        return self.done or self.error is not None
+
+
 @dataclass(frozen=True)
 class SystemSnapshot:
     """One tick's worth of truth, handed to the GUI.
@@ -73,6 +106,8 @@ class SystemSnapshot:
     p1_states: tuple[str, ...] = ()
     ps_state: str | None = None
     now: float | None = None            # monotonic clock used for Age
+    #: Live state of the calibration recording (default: no run).
+    calibration: CalibrationRun = field(default_factory=CalibrationRun)
 
     def as_dict(self) -> dict:
         return {
@@ -81,6 +116,7 @@ class SystemSnapshot:
             "p1_states": self.p1_states,
             "ps_state": self.ps_state,
             "now": self.now,
+            "calibration": self.calibration,
         }
 
 
